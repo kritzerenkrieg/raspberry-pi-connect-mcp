@@ -1,0 +1,22 @@
+{
+  "name": "rpi-connect-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that gives AI agents shell access to Raspberry Pi devices through the Raspberry Pi Connect web remote shell",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": { "rpi-connect-mcp": "src/server.js" },
+  "scripts": {
+    "start": "node src/server.js",
+    "login": "node scripts/login.js"
+  },
+  "keywords": ["mcp", "model-context-protocol", "raspberry-pi", "raspberry-pi-connect", "remote-shell", "claude", "ai-agent", "playwright"],
+  "author": "kritzerenkrieg",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/kritzerenkrieg/rpi-connect-mcp.git" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "playwright-core": "^1.47.2",
+    "zod": "^3.23.8"
+  }
+}
