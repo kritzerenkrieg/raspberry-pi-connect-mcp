@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.kritzerenkrieg/raspberry-pi-connect-mcp",
+  "title": "Raspberry Pi Connect",
+  "description": "Shell access to Raspberry Pi devices through the Raspberry Pi Connect web remote shell",
+  "repository": {
+    "url": "https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "raspberry-pi-connect-mcp",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "RPI_CONNECT_ALLOW", "description": "Comma-separated device name substrings the agent may use", "isRequired": false, "isSecret": false },
+        { "name": "RPI_CONNECT_HEADED", "description": "Set to 1 to show the browser window", "isRequired": false, "isSecret": false },
+        { "name": "RPI_CONNECT_CHROME", "description": "Path to a Chrome binary", "isRequired": false, "isSecret": false },
+        { "name": "RPI_CONNECT_SESSION", "description": "Path to the saved session cookie file", "isRequired": false, "isSecret": false }
+      ]
+    }
+  ]
+}

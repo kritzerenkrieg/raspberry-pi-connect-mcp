@@ -22,7 +22,16 @@ No SSH, port forwarding, VPN or public IP is needed. If the Pi shows up in Conne
 - A Raspberry Pi Connect account, with **remote shell** enabled on the devices you want to use
 - Chrome for Testing (installed below; no sudo needed)
 
-## Setup
+<!-- mcp-name: io.github.kritzerenkrieg/raspberry-pi-connect-mcp -->
+
+## Quick start (npm)
+```bash
+npx @puppeteer/browsers install chrome@stable --path ~/.cache/rpi-connect-mcp
+npx -p raspberry-pi-connect-mcp raspberry-pi-connect-mcp-login   # sign in by hand in the Chrome window
+claude mcp add rpi-connect -- npx -y raspberry-pi-connect-mcp
+```
+
+## Setup (from source)
 ```bash
 git clone https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git
 cd raspberry-pi-connect-mcp

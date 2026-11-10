@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Interactive login. Starts Chrome as a normal process; the user signs in by hand.
 // Connect uses session-only cookies (deleted when Chrome closes), so once the user reaches the
 // device list we read the cookies over a localhost debug port and save them for the MCP.
