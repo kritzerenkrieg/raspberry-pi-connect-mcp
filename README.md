@@ -1,4 +1,4 @@
-# rpi-connect-mcp
+# raspberry-pi-connect-mcp
 
 An [MCP](https://modelcontextprotocol.io) server that gives an AI agent (Claude Code, Claude Desktop, or any MCP client)
 shell access to your Raspberry Pi devices through the [Raspberry Pi Connect](https://connect.raspberrypi.com) web remote shell.
@@ -24,8 +24,8 @@ No SSH, port forwarding, VPN or public IP is needed. If the Pi shows up in Conne
 
 ## Setup
 ```bash
-git clone https://github.com/kritzerenkrieg/rpi-connect-mcp.git
-cd rpi-connect-mcp
+git clone https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git
+cd raspberry-pi-connect-mcp
 npm install
 npx @puppeteer/browsers install chrome@stable --path ~/.cache/rpi-connect-mcp
 npm run login        # a Chrome window opens: sign in by hand; it closes by itself once the device list loads
@@ -35,7 +35,7 @@ npm run login        # a Chrome window opens: sign in by hand; it closes by itse
 
 Register the server with your MCP client. For Claude Code:
 ```bash
-claude mcp add rpi-connect -- node /absolute/path/to/rpi-connect-mcp/src/server.js
+claude mcp add rpi-connect -- node /absolute/path/to/raspberry-pi-connect-mcp/src/server.js
 ```
 Other clients (Claude Desktop, etc.):
 ```json
@@ -43,7 +43,7 @@ Other clients (Claude Desktop, etc.):
   "mcpServers": {
     "rpi-connect": {
       "command": "node",
-      "args": ["/absolute/path/to/rpi-connect-mcp/src/server.js"],
+      "args": ["/absolute/path/to/raspberry-pi-connect-mcp/src/server.js"],
       "env": { "RPI_CONNECT_ALLOW": "lab-pi,kiosk" }
     }
   }
