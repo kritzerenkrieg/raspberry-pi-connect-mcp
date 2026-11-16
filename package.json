@@ -1,8 +1,8 @@
 {
   "name": "raspberry-pi-connect-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.kritzerenkrieg/raspberry-pi-connect-mcp",
-  "description": "MCP server that gives AI agents shell access to Raspberry Pi devices through the Raspberry Pi Connect web remote shell",
+  "description": "Raspi Connect MCP / RPi Connect MCP server: gives AI agents shell access to Raspberry Pi devices through the Raspberry Pi Connect web remote shell, with no SSH or open ports",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -16,11 +16,18 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
+    "mcp-server",
     "raspberry-pi",
     "raspberry-pi-connect",
+    "raspi",
+    "raspi-connect",
+    "raspi-connect-mcp",
+    "rpi",
+    "rpi-connect",
+    "rpi-connect-mcp",
     "remote-shell",
-    "claude",
     "ai-agent",
+    "claude",
     "playwright"
   ],
   "author": "kritzerenkrieg",

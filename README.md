@@ -1,7 +1,11 @@
 # raspberry-pi-connect-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that gives an AI agent (Claude Code, Claude Desktop, or any MCP client)
-shell access to your Raspberry Pi devices through the [Raspberry Pi Connect](https://connect.raspberrypi.com) web remote shell.
+**Raspi Connect MCP** · **RPi Connect MCP** — an [MCP](https://modelcontextprotocol.io) server that gives an AI agent
+(Claude Code, Claude Desktop, or any MCP client) shell access to your Raspberry Pi devices through the
+[Raspberry Pi Connect](https://connect.raspberrypi.com) web remote shell.
+
+> Looking for "raspi connect mcp", "rpi connect mcp", "raspberry pi connect mcp" or "raspi remote shell mcp"?
+> This is that project. Search terms: `raspi-connect-mcp`, `rpi-connect-mcp`, `raspberry-pi-connect-mcp`.
 
 Raspberry Pi Connect has no public API for its remote shell, so this server drives the web UI with a headless Chrome:
 it opens the device's remote-shell page, hooks the xterm.js terminal, types commands and reads the output back.
