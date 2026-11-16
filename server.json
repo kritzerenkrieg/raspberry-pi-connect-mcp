@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.kritzerenkrieg/raspberry-pi-connect-mcp",
   "title": "Raspberry Pi Connect (Raspi Connect / RPi Connect) MCP",
-  "description": "Raspi Connect MCP / RPi Connect MCP: shell access to Raspberry Pi devices through the Raspberry Pi Connect web remote shell",
+  "description": "Raspi Connect MCP: shell access to Raspberry Pi devices via Raspberry Pi Connect web shell",
   "repository": {
     "url": "https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp",
     "source": "github"
