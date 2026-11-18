@@ -4,9 +4,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { Connect } from './connect.js';
+import { startLogin, logout, savedSession, loginState } from './auth.js';
 
 const connect = new Connect();
-const server = new McpServer({ name: 'rpi-connect', version: '0.1.0' });
+const server = new McpServer({ name: 'rpi-connect', version: '0.2.0' });
 
 const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] });
 const wrap = (fn) => async (args) => {
@@ -59,6 +60,58 @@ server.tool(
   'Close the remote shell session to a device.',
   { device },
   wrap(async ({ device }) => text((await connect.close(device)) ? 'closed' : 'no open session')),
+);
+
+server.tool(
+  'account',
+  'Show which Raspberry Pi Connect account is signed in (email when it can be read), when the session was ' +
+    'saved, its device names, and whether a login is in progress.',
+  {},
+  wrap(async () => {
+    const saved = savedSession();
+    const out = { signedIn: !!saved, savedAt: saved?.savedAt || null, ...loginState() };
+    if (saved) {
+      try {
+        out.email = await connect.accountEmail();
+        out.devices = (await connect.listDevices()).map((d) => d.name);
+      } catch (e) {
+        out.signedIn = false;
+        out.error = e.message;
+      }
+    }
+    return text(out);
+  }),
+);
+
+server.tool(
+  'login',
+  'Sign in to Raspberry Pi Connect: opens a Chrome window on this computer where the USER signs in by hand ' +
+    '(tell them to do so). Waits up to wait_sec for it; if still in progress, call account later. ' +
+    'fresh=true signs out the current account first (switch account). The new session is used right away.',
+  {
+    fresh: z.boolean().default(false).describe('Sign out first (current session backed up), to switch account'),
+    wait_sec: z.number().int().min(0).max(600).default(180).describe('Seconds to wait for the user to finish'),
+  },
+  wrap(async ({ fresh, wait_sec }) => {
+    const out = {};
+    if (fresh) { await connect.reset(); out.logout = await logout(); }
+    const l = startLogin({ onSaved: () => connect.reset() });
+    out.status = l.started ? 'Chrome window opened: the user must sign in there' : 'login already in progress';
+    const r = await Promise.race([l.promise, new Promise((res) => setTimeout(() => res(null), wait_sec * 1000))]);
+    out.result = r || { ok: null, message: `Still waiting after ${wait_sec}s; call account to check.` };
+    return text(out);
+  }),
+);
+
+server.tool(
+  'logout',
+  'Sign out of Raspberry Pi Connect. The session and Chrome profile are moved to a backup folder ' +
+    '(old-account_<time>) so the account can be restored, or deleted with delete=true.',
+  { delete: z.boolean().default(false).describe('Delete the session instead of backing it up') },
+  wrap(async ({ delete: del }) => {
+    await connect.reset();
+    return text(await logout({ del }));
+  }),
 );
 
 const shutdown = async () => { await connect.shutdown(); process.exit(0); };

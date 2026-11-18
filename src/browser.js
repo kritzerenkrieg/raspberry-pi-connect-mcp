@@ -7,7 +7,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 
 export const CONNECT_URL = 'https://connect.raspberrypi.com';
-const BASE = path.join(os.homedir(), '.config', 'rpi-connect-mcp');
+export const BASE = path.join(os.homedir(), '.config', 'rpi-connect-mcp');
 export const PROFILE_DIR = process.env.RPI_CONNECT_PROFILE || path.join(BASE, 'chrome-profile');
 export const SESSION_FILE = process.env.RPI_CONNECT_SESSION || path.join(BASE, 'session.json');
 
@@ -20,7 +20,7 @@ export function chromePath() {
 }
 
 export async function launch({ headless = process.env.RPI_CONNECT_HEADED !== '1' } = {}) {
-  if (!fs.existsSync(SESSION_FILE)) throw new Error('Not signed in. Run: node scripts/login.js');
+  if (!fs.existsSync(SESSION_FILE)) throw new Error('Not signed in. Use the login tool (or run: node scripts/login.js)');
   const browser = await chromium.launch({ executablePath: chromePath(), headless });
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   await ctx.addCookies(JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')).cookies);

@@ -1,5 +1,8 @@
 // Drives Raspberry Pi Connect's web remote shell (xterm.js over WebRTC) with a headless browser.
-import { launch, CONNECT_URL } from './browser.js';
+import fs from 'node:fs';
+import { launch, CONNECT_URL, SESSION_FILE } from './browser.js';
+
+const sessionStamp = () => { try { return fs.statSync(SESSION_FILE).mtimeMs; } catch { return null; } };
 
 const CONNECT_TIMEOUT = 120_000; // relay connections can take ~30s to come up
 
@@ -16,7 +19,7 @@ export function stripAnsi(s) {
 }
 
 class ExpiredError extends Error {
-  constructor() { super('Raspberry Pi Connect session expired. Ask the user to run: node scripts/login.js'); }
+  constructor() { super('Raspberry Pi Connect session expired. Use the login tool, then ask the user to sign in in the Chrome window.'); }
 }
 
 export class Connect {
@@ -25,8 +28,12 @@ export class Connect {
   devicesCache = null;
 
   async context() {
+    // Reload when the session file changed (login/logout from the tools or a terminal): no reconnect needed.
+    const stamp = sessionStamp();
+    if (this.ctx && stamp !== this.stamp) await this.reset();
     if (!this.ctx) {
       this.ctx = await launch();
+      this.stamp = stamp;
       this.ctx.on('close', () => { this.ctx = null; this.sessions.clear(); });
     }
     return this.ctx;
@@ -75,6 +82,7 @@ export class Connect {
   }
 
   async resolve(device) {
+    if (sessionStamp() !== this.stamp) this.devicesCache = null; // account may have changed
     const devices = this.devicesCache || (await this.listDevices());
     const q = device.trim().toLowerCase();
     let m = devices.filter((d) => d.id === q || d.name.toLowerCase() === q);
@@ -216,6 +224,37 @@ export class Connect {
     await s.page.close().catch(() => {});
     this.sessions.delete(d.id);
     return true;
+  }
+
+  // Drop the browser, shell sessions and device cache, so the next call loads the current session file.
+  async reset() {
+    const ctx = this.ctx;
+    this.ctx = null;
+    this.sessions.clear();
+    this.devicesCache = null;
+    await ctx?.close().catch(() => {});
+  }
+
+  // Best effort: the signed-in account's email, read from the Connect page, else the Raspberry Pi ID page.
+  async accountEmail() {
+    const ctx = await this.context();
+    const page = await ctx.newPage();
+    const find = () => page.evaluate(() => {
+      const m = document.body.innerText.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/);
+      return m ? m[0] : null;
+    });
+    try {
+      await page.goto(`${CONNECT_URL}/devices`, { waitUntil: 'domcontentloaded' });
+      if (page.url().includes('/sign-in')) throw new ExpiredError();
+      let email = await find();
+      if (!email) {
+        await page.goto('https://id.raspberrypi.com/profile', { waitUntil: 'domcontentloaded' }).catch(() => {});
+        email = await find().catch(() => null);
+      }
+      return email;
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
 
   async shutdown() {

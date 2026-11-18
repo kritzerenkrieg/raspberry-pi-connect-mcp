@@ -7,12 +7,12 @@
     "url": "https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.2.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "raspberry-pi-connect-mcp",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },

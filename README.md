@@ -43,7 +43,7 @@ npm install
 npx @puppeteer/browsers install chrome@stable --path ~/.cache/rpi-connect-mcp
 npm run login        # a Chrome window opens: sign in by hand; it closes by itself once the device list loads
 ```
-`npm run login` saves the session cookies to `~/.config/rpi-connect-mcp/session.json` (mode 600).
+`npm run login` (or the `login` tool; `npm run login -- --fresh` / `login(fresh=true)` to switch account) saves the session cookies to `~/.config/rpi-connect-mcp/session.json` (mode 600).
 **Treat that file like a password.** Connect cookies are session-only, so run `npm run login` again when the tools report that the session expired.
 
 Register the server with your MCP client. For Claude Code:
@@ -71,6 +71,9 @@ Other clients (Claude Desktop, etc.):
 | `send_keys(device, keys)` | Send raw keystrokes (`\n`, `\t`, `\x03` Ctrl-C, `\x04` Ctrl-D, `\x1b[A` Up…); returns the screen |
 | `read_screen(device, lines=0)` | Current terminal screen plus a little scrollback |
 | `close_session(device)` | Close the shell session for a device |
+| `account` | Which account is signed in (email when readable), session age, device names, login in progress |
+| `login(fresh=false, wait_sec=180)` | Opens a Chrome window on this computer for the user to sign in; the new session is used right away. `fresh=true` signs out first (switch account) |
+| `logout(delete=false)` | Signs out: session and Chrome profile move to `~/.config/rpi-connect-mcp/old-account_<time>/` (restorable), or are deleted |
 
 `device` can be the exact name, a unique substring of the name, or the device UUID.
 The first call to a device takes about 10 to 30 s while Connect sets up the WebRTC relay. Later calls reuse the session.
