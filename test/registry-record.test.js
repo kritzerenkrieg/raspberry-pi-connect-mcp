@@ -100,11 +100,32 @@ test('lookup does not retry a 404', async () => {
   assert.deepEqual([r.status, n], [404, 1]);
 });
 
-test('lookup retries 429 and a body that never finishes, then gives up', async () => {
+// A 200 whose body never finishes: it only ends when the request's signal aborts.
+const stalled = (signal) => ({
+  status: 200,
+  json: () => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason))),
+});
+
+test('lookup retries 429 and a body that never finishes, then reports a timeout', async () => {
   let n = 0;
-  const hang = () => ({ status: 200, json: (signal) => new Promise((_, reject) => setTimeout(() => reject(new Error('aborted')), 5)) });
-  const r = await lookup(local, { fetch: async () => (++n === 1 ? { status: 429 } : hang()), wait: 0, timeout: 5 });
-  assert.deepEqual([r.status, n], [0, 3]);
+  const r = await lookup(local, { fetch: async (url, { signal }) => (++n === 1 ? { status: 429 } : stalled(signal)), wait: 0, timeout: 20 });
+  assert.equal(n, 3);
+  assert.equal(r.error, 'timeout');
+  assert.match(decide(r.status, r.body, local, r.error).message, /timed out/);
+});
+
+test('lookup reports a 200 with invalid JSON as such, not as a connection failure', async () => {
+  const r = await lookup(local, { fetch: async () => ({ status: 200, json: async () => JSON.parse('<html>') }), wait: 0 });
+  assert.deepEqual([r.status, r.error], [200, 'invalid-json']);
+  const d = decide(r.status, r.body, local, r.error);
+  assert.equal(d.action, 'stop');
+  assert.match(d.message, /HTTP 200 with a body that is not valid JSON/);
+});
+
+test('lookup reports a refused connection as a network error', async () => {
+  const r = await lookup(local, { fetch: async () => { throw new TypeError('fetch failed'); }, wait: 0 });
+  assert.equal(r.error, 'network');
+  assert.match(decide(r.status, r.body, local, r.error).message, /could not connect/);
 });
 
 test('lookup does not retry 401', async () => {
@@ -124,7 +145,7 @@ test('an empty-string choice is kept: adding one is a difference', () => {
   assert.equal(sameInstall(withInput({ choices: [] }), local).same, true, 'an empty list is omitted by the registry');
 });
 
-test('value: "" equals no value, as the registry stores it (Input.Value is omitempty)', () => {
+test('for an environment variable, value: "" equals no value (Input.Value is omitempty)', () => {
   assert.equal(sameInstall(withInput({}), withInput({ value: '' })).same, true);
   assert.equal(sameInstall(withInput({}), withInput({ value: 'x' })).same, false);
 });
@@ -133,4 +154,24 @@ test('a variables entry named __proto__ is compared like any other key', () => {
   const remote = (variables) => ({ ...local, remotes: [{ type: 'streamable-http', url: 'https://{__proto__}.x', variables }] });
   assert.equal(sameInstall(remote(undefined), remote(JSON.parse('{"__proto__": {}}'))).same, false);
   assert.equal(sameInstall(remote(JSON.parse('{"__proto__": {}}')), remote(JSON.parse('{"__proto__": {}}'))).same, true);
+});
+
+const withArgument = (arg) => {
+  const s = structuredClone(local);
+  s.packages[0].packageArguments = [{ type: 'positional', ...arg }];
+  return s;
+};
+
+test('for an argument, an explicit empty value or valueHint differs from omitted (argument.go keeps them)', () => {
+  assert.equal(sameInstall(withArgument({ valueHint: 'file' }), withArgument({ valueHint: 'file', value: '' })).same, false);
+  assert.equal(sameInstall(withArgument({ value: 'x' }), withArgument({ value: 'x', valueHint: '' })).same, false);
+  assert.equal(sameInstall(withArgument({ value: '' }), withArgument({ value: '' })).same, true);
+  assert.equal(sameInstall(withArgument({ value: 'x', isRepeated: false }), withArgument({ value: 'x' })).same, true);
+});
+
+test('a variable named "variables" is an input like any other', () => {
+  const remote = (value) => ({ ...local, remotes: [{ type: 'streamable-http', url: 'https://{variables}.x', variables: { variables: { value } } }] });
+  assert.equal(sameInstall(remote('us'), remote('eu')).same, false);
+  assert.equal(sameInstall(remote('us'), remote('us')).same, true);
+  assert.deepEqual(plain(normalize(remote('us').remotes)), [{ type: 'streamable-http', url: 'https://{variables}.x', variables: { variables: { value: 'us' } } }]);
 });

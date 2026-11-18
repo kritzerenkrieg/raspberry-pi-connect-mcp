@@ -84,7 +84,8 @@ jobs:
               echo "::error::$name@$v is already on npm, published from commit '${head:-unknown}', not this release's $GITHUB_SHA. Release the next patch version instead."
               exit 1
             fi
-            if [ -n "$out" ]; then echo "::error::unexpected npm view output: $out"; exit 1; fi
+            # Succeeded without the version (e.g. empty output): not a confirmed absence.
+            echo "::error::unexpected npm view output '$out'; publishing needs a confirmed E404"; exit 1
           elif ! grep -q E404 npm-view.err; then
             cat npm-view.err
             echo "::error::could not check whether $name@$v is on npm; not publishing"

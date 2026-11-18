@@ -16,22 +16,34 @@ export const INSTALL_FIELDS = ['name', 'version', 'packages', 'remotes'];
 
 // Canonical form for comparing, following how the registry (Go, v1.8.9 pkg/model) stores a record:
 // - an object field that is false, '', 0, null, an empty list or an empty map is omitted
-//   (`omitempty` on every optional field: isRequired, isSecret, value, valueHint, choices, ...);
+//   (`omitempty` on the optional fields: isRequired, isSecret, value, choices, ...);
+// - except in packageArguments / runtimeArguments: Argument's own MarshalJSON (argument.go) keeps
+//   an explicitly empty `value` or `valueHint`, so '' there differs from omitted;
 // - list elements are kept as they are (a '' choice stays a choice);
-// - entries of a `variables` map are kept even when empty (their presence decides substitution);
+// - every entry of a `variables` map is kept, even when empty (its presence decides substitution);
+//   entries are input descriptors whatever their name (a variable may be called "variables");
 // - `format: "string"` equals no format (the schema's default).
 // Objects get sorted keys and a null prototype, so a key like "__proto__" stays an own property.
 const isEmpty = (v) => v === undefined || v === false || v === null || v === '' || v === 0
   || (Array.isArray(v) && v.length === 0) || (typeof v === 'object' && v && !Array.isArray(v) && Object.keys(v).length === 0);
+const KEEP_EMPTY_IN_ARGUMENT = new Set(['value', 'valueHint']);
 
-export function normalize(value, key) {
-  if (Array.isArray(value)) return value.map((v) => (v && typeof v === 'object' ? normalize(v) : v));
+// `kind`: what `value` is. 'object' (a model struct), 'variables' (a name -> input map) or
+// 'argument' (an entry of packageArguments / runtimeArguments).
+export function normalize(value, kind = 'object') {
+  if (Array.isArray(value)) return value.map((v) => (v && typeof v === 'object' ? normalize(v, kind) : v));
   if (!value || typeof value !== 'object') return value;
   const out = Object.create(null);
   for (const k of Object.keys(value).sort()) {
-    const v = normalize(value[k], k);
-    if (key === 'variables') out[k] = v && typeof v === 'object' ? v : Object.create(null);
-    else if (k === 'format' && v === 'string') continue;
+    if (kind === 'variables') {
+      const v = normalize(value[k]);
+      out[k] = v && typeof v === 'object' ? v : value[k] ?? Object.create(null);
+      continue;
+    }
+    const childKind = k === 'variables' ? 'variables' : k === 'packageArguments' || k === 'runtimeArguments' ? 'argument' : 'object';
+    const v = normalize(value[k], childKind);
+    if (k === 'format' && v === 'string') continue;
+    if (kind === 'argument' && KEEP_EMPTY_IN_ARGUMENT.has(k) && v === '') out[k] = v;
     else if (!isEmpty(v)) out[k] = v;
   }
   return out;
@@ -48,9 +60,14 @@ export function sameInstall(record, serverJson) {
   return { same: JSON.stringify(published) === JSON.stringify(local), published, local };
 }
 
-// From the lookup's HTTP status and parsed body: { action: 'publish' | 'skip' | 'stop', message }.
-export function decide(status, body, serverJson) {
+// From the lookup's result: { action: 'publish' | 'skip' | 'stop', message }.
+// `error`: why the last attempt failed ('timeout', 'invalid-json' or 'network'), if it did.
+export function decide(status, body, serverJson, error) {
   const v = serverJson.version;
+  if (error) {
+    const what = { timeout: 'timed out', 'invalid-json': `returned HTTP ${status} with a body that is not valid JSON`, network: 'could not connect' }[error] ?? error;
+    return { action: 'stop', message: `MCP Registry lookup ${what} (after retries); not publishing` };
+  }
   if (status === 404) return { action: 'publish', message: `Version ${v} is not in the MCP Registry` };
   if (status !== 200) return { action: 'stop', message: `MCP Registry lookup returned HTTP ${status}; not publishing` };
   const state = body?._meta?.['io.modelcontextprotocol.registry/official']?.status ?? 'unknown';
@@ -72,19 +89,23 @@ export function decide(status, body, serverJson) {
 export const retryable = (status) => status === 0 || status === 429 || status >= 500;
 export async function lookup(serverJson, { fetch = globalThis.fetch, tries = 3, wait = 2000, timeout = 30_000 } = {}) {
   const url = `${REGISTRY}/v0/servers/${encodeURIComponent(serverJson.name)}/versions/${encodeURIComponent(serverJson.version)}?include_deleted=true`;
-  let last = 0;
+  let last = { status: 0, body: null, error: 'network' };
   for (let i = 0; i < tries; i++) {
     if (i) await new Promise((r) => setTimeout(r, wait));
+    let status = 0;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
-      last = res.status;
+      status = res.status;
       if (res.status === 200) return { status: 200, body: await res.json() };
       if (!retryable(res.status)) return { status: res.status, body: null };
-    } catch {
-      last = 0; // network error, timeout or a broken body: retry
+      last = { status, body: null };
+    } catch (e) {
+      // Keep why it failed, for the log: a deadline, a 200 with a broken body, or the connection.
+      const error = e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout' : e instanceof SyntaxError ? 'invalid-json' : 'network';
+      last = { status, body: null, error };
     }
   }
-  return { status: last, body: null };
+  return last;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -92,8 +113,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const outAt = args.indexOf('--out');
   const out = outAt === -1 ? null : args.splice(outAt, 2)[1];
   const serverJson = JSON.parse(fs.readFileSync(args[0] || 'server.json', 'utf8'));
-  const { status, body } = await lookup(serverJson);
-  const d = decide(status, body, serverJson);
+  const { status, body, error } = await lookup(serverJson);
+  const d = decide(status, body, serverJson, error);
   if (d.details) console.log(d.details);
   if (d.action === 'stop') {
     console.log(`::error::${d.message}`);
