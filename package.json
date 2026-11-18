@@ -38,7 +38,7 @@
     "url": "git+https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.13.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
