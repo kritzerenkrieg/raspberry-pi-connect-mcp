@@ -12,7 +12,7 @@
   "scripts": {
     "start": "node src/server.js",
     "login": "node scripts/login.js",
-    "test": "node --experimental-vm-modules --test 'test/**/*.test.js'"
+    "test": "node --experimental-vm-modules --test"
   },
   "keywords": [
     "mcp",
