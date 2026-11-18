@@ -1,0 +1,125 @@
+# Publishing a GitHub release (tag vX.Y.Z) publishes that version to npm and the MCP Registry.
+# npm: trusted publishing (OIDC), no token secret; provenance links the package to this run and commit.
+# One-time setup on npmjs.com: package Settings > Trusted Publisher > GitHub Actions,
+# owner kritzerenkrieg, repository raspberry-pi-connect-mcp, workflow release.yml,
+# Allowed actions: allow npm publish. The first publish must happen within 2 days. See RELEASING.md.
+#
+# Three jobs: check -> npm -> mcp-registry. "Re-run failed jobs" re-runs only the failed job and
+# those after it, and each publish job skips a version that is confirmed to be published already.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  MCP_PUBLISHER_VERSION: v1.8.9
+  MCP_PUBLISHER_SHA256: 4d527ca8f1ced0394c962dc925c2a4a4addef441cbefd62501c875e9481823a8
+  MCP_PUBLISHER_URL: https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # Tag vX.Y.Z (no pre-releases), six version fields, npm entry in server.json, mcpName.
+      - name: Check the release tag and every version field
+        run: node scripts/check-release.mjs "$GITHUB_REF_NAME"
+      - name: Download mcp-publisher (pinned and checksum-verified)
+        run: |
+          curl -fsSL --retry 3 -o mcp-publisher.tar.gz "$MCP_PUBLISHER_URL"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+      # Before npm uses up the version: the registry's own validation of server.json (no login).
+      - name: Validate server.json with the MCP Registry
+        run: ./mcp-publisher validate
+      - run: npm ci
+      - run: npm test
+
+  npm:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24 # trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0
+          registry-url: https://registry.npmjs.org
+      # Publishes only when npm confirms the version is absent; a failed lookup stops the job.
+      # An existing version is accepted only if npm recorded this release's commit as its gitHead
+      # and its files equal a package packed from this checkout (a re-run). Anything else stops.
+      - name: Publish to npm (skipped if this commit's version is already there)
+        run: |
+          name="$(node -p 'require("./package.json").name')"
+          v="$(node -p 'require("./package.json").version')"
+          if out="$(npm view "$name@$v" version 2>npm-view.err)"; then
+            if [ "$out" = "$v" ]; then
+              head="$(npm view "$name@$v" gitHead)"
+              if [ "$head" = "$GITHUB_SHA" ]; then
+                # gitHead is only HEAD at publish time; uncommitted edits would not show. Compare files.
+                mkdir -p "$RUNNER_TEMP/published" "$RUNNER_TEMP/local"
+                npm pack "$name@$v" --pack-destination "$RUNNER_TEMP/published" >/dev/null
+                npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/local" >/dev/null
+                tar xzf "$RUNNER_TEMP"/published/*.tgz -C "$RUNNER_TEMP/published"
+                tar xzf "$RUNNER_TEMP"/local/*.tgz -C "$RUNNER_TEMP/local"
+                # --no-dereference: compare symlinks as links, never read what they point to.
+                # diff exits 0 = same, 1 = different, 2 = trouble (e.g. unreadable file).
+                rc=0
+                diff -r --no-dereference "$RUNNER_TEMP/published/package" "$RUNNER_TEMP/local/package" || rc=$?
+                case "$rc" in
+                  0) echo "$name@$v is already on npm from $GITHUB_SHA with the same files; skipping"; exit 0 ;;
+                  1) echo "::error::$name@$v on npm was published from $GITHUB_SHA but its files differ from this checkout (diff above). Release the next patch version."; exit 1 ;;
+                  *) echo "::error::could not compare $name@$v on npm with this checkout (diff exit $rc); nothing was published. Re-run failed jobs to retry."; exit 1 ;;
+                esac
+              fi
+              echo "::error::$name@$v is already on npm, published from commit '${head:-unknown}', not this release's $GITHUB_SHA. Release the next patch version instead."
+              exit 1
+            fi
+            # Succeeded without the version (e.g. empty output): not a confirmed absence.
+            echo "::error::unexpected npm view output '$out'; publishing needs a confirmed E404"; exit 1
+          elif ! grep -q E404 npm-view.err; then
+            cat npm-view.err
+            echo "::error::could not check whether $name@$v is on npm; not publishing"
+            exit 1
+          fi
+          # Right before npm uses up the version: stop if the MCP Registry has this name + version
+          # with a different install configuration, or as deleted (it could then never be published).
+          node scripts/registry-record.mjs server.json
+          npm publish --access public
+
+  mcp-registry:
+    needs: npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # MCP Registry login via GitHub OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Download mcp-publisher (pinned and checksum-verified)
+        run: |
+          curl -fsSL --retry 3 -o mcp-publisher.tar.gz "$MCP_PUBLISHER_URL"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+      # The same check as in the npm job, again, for a record created in between:
+      # absent = publish; same install configuration = skip; conflict, deleted, lookup error = stop.
+      - name: Publish to the MCP Registry (skipped if this version is already there)
+        run: |
+          node scripts/registry-record.mjs server.json --out registry-action.txt
+          action="$(cat registry-action.txt)"
+          case "$action" in
+            publish) ./mcp-publisher login github-oidc && ./mcp-publisher publish ;;
+            skip) ;;
+            *) echo "::error::unexpected registry check result '$action'; not publishing"; exit 1 ;;
+          esac
