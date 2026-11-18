@@ -135,3 +135,17 @@ test('gate checks the registry namespace against the repository owner', () => {
   assert.deepEqual(releaseProblems(s, `v${v}`, owner), []);
   assert.match(releaseProblems(s, `v${v}`, 'someone-else').join('\n'), /not in the io\.github\.someone-else\/ namespace/);
 });
+
+test('a declaration inside a string is not the live one', (t) => {
+  // CodeRabbit's example: the string matches the other fields, the live constructor does not.
+  const root = fixture(t, server(`const example = "${decl(v)}";\nconst server = new McpServer({ name: "rpi-connect", version: "0.1.0", });`));
+  assert.match(releaseProblems(load(root), `v${v}`).join('\n'), /src\/server.js McpServer version is "0.1.0"/);
+  const src = setTo(root, '1.2.3');
+  assert.ok(src.includes(`const example = "${decl(v)}";`), 'the string is left alone');
+  assert.ok(src.includes('version: "1.2.3", });'), 'the live constructor is updated');
+});
+
+test('a declaration inside a template literal is not the live one', (t) => {
+  const root = fixture(t, server(`const doc = \`${decl('0.0.1')}\`;\nconst server = ${decl(v)};`));
+  assert.deepEqual(releaseProblems(load(root), `v${v}`), []);
+});

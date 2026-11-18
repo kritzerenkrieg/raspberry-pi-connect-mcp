@@ -56,7 +56,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       # Publishes only when npm confirms the version is absent; a failed lookup stops the job.
       # An existing version is accepted only if npm recorded this release's commit as its gitHead
-      # (a re-run); a version published from another commit stops the release.
+      # and its files equal a package packed from this checkout (a re-run). Anything else stops.
       - name: Publish to npm (skipped if this commit's version is already there)
         run: |
           name="$(node -p 'require("./package.json").name')"
@@ -64,7 +64,19 @@ jobs:
           if out="$(npm view "$name@$v" version 2>npm-view.err)"; then
             if [ "$out" = "$v" ]; then
               head="$(npm view "$name@$v" gitHead)"
-              if [ "$head" = "$GITHUB_SHA" ]; then echo "$name@$v is already on npm from $GITHUB_SHA; skipping"; exit 0; fi
+              if [ "$head" = "$GITHUB_SHA" ]; then
+                # gitHead is only HEAD at publish time; uncommitted edits would not show. Compare files.
+                mkdir -p "$RUNNER_TEMP/published" "$RUNNER_TEMP/local"
+                npm pack "$name@$v" --pack-destination "$RUNNER_TEMP/published" >/dev/null
+                npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/local" >/dev/null
+                tar xzf "$RUNNER_TEMP"/published/*.tgz -C "$RUNNER_TEMP/published"
+                tar xzf "$RUNNER_TEMP"/local/*.tgz -C "$RUNNER_TEMP/local"
+                if diff -r "$RUNNER_TEMP/published/package" "$RUNNER_TEMP/local/package"; then
+                  echo "$name@$v is already on npm from $GITHUB_SHA with the same files; skipping"; exit 0
+                fi
+                echo "::error::$name@$v on npm was published from $GITHUB_SHA but its files differ from this checkout (diff above). Release the next patch version."
+                exit 1
+              fi
               echo "::error::$name@$v is already on npm, published from commit '${head:-unknown}', not this release's $GITHUB_SHA. Release the next patch version instead."
               exit 1
             fi
@@ -93,8 +105,8 @@ jobs:
           echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
           tar xzf mcp-publisher.tar.gz mcp-publisher
       # Exact name + version lookup, deleted versions included (the registry still refuses to
-      # publish them again): active/deprecated = published (skip), deleted = stop,
-      # 404 = absent (publish), anything else = stop.
+      # publish them again): active/deprecated with the same install configuration as server.json
+      # = published (skip), a different one or deleted = stop, 404 = absent (publish), else stop.
       - name: Publish to the MCP Registry (skipped if this version is already there)
         run: |
           name="$(node -p 'encodeURIComponent(require("./server.json").name)')"
@@ -105,7 +117,13 @@ jobs:
             200)
               status="$(node -p 'JSON.parse(require("fs").readFileSync("lookup.json","utf8"))._meta?.["io.modelcontextprotocol.registry/official"]?.status ?? "unknown"')"
               case "$status" in
-                active|deprecated) echo "Version $v is already in the MCP Registry ($status); skipping" ;;
+                active|deprecated)
+                  if node scripts/registry-record.mjs lookup.json server.json; then
+                    echo "Version $v is already in the MCP Registry ($status) with this server.json; skipping"
+                  else
+                    echo "::error::Version $v is already in the MCP Registry with a different install configuration (above); it can't be replaced. Release the next patch version."
+                    exit 1
+                  fi ;;
                 deleted) echo "::error::Version $v was deleted from the MCP Registry and can't be published again. Release the next patch version."; exit 1 ;;
                 *) echo "::error::MCP Registry returned version $v with status '$status'; not publishing"; exit 1 ;;
               esac ;;

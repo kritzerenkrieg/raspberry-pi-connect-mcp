@@ -10,31 +10,33 @@ export const RELEASE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 // optional trailing comma. Groups: 3 = text up to the version's opening quote, 4 = version.
 const SERVER_DECL = /(new McpServer\(\{\s*name:\s*(['"])rpi-connect\2,\s*version:\s*(['"]))([^'"]*)\3\s*,?\s*\}\)/g;
 
-// `source` with every comment replaced by spaces (same length, so offsets still match). A small
-// JavaScript scanner: it knows strings, template literals and regex literals, so a `//` inside
-// 'https://…' or /a\/\// is not taken for a comment.
-export function blankComments(source) {
+// A small JavaScript scanner. Returns `code`: `source` with every comment replaced by spaces (same
+// length, so offsets still match), and `strings`: the [start, end) ranges of string, template and
+// regex literals. It knows those literals, so a `//` inside 'https://…' or /a\/\// is not taken for
+// a comment, and text inside a string is not taken for code.
+export function scanSource(source) {
   const out = source.split('');
+  const strings = [];
   let i = 0;
   let prev = ''; // last significant character, to tell a regex literal from division
   const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== '\n') out[k] = ' '; };
   while (i < source.length) {
     const c = source[i];
     const n = source[i + 1];
+    const start = i;
     if (c === '/' && n === '/') {
       const end = source.indexOf('\n', i);
-      const stop = end === -1 ? source.length : end;
-      blank(i, stop);
-      i = stop;
+      i = end === -1 ? source.length : end;
+      blank(start, i);
     } else if (c === '/' && n === '*') {
       const end = source.indexOf('*/', i + 2);
-      const stop = end === -1 ? source.length : end + 2;
-      blank(i, stop);
-      i = stop;
+      i = end === -1 ? source.length : end + 2;
+      blank(start, i);
     } else if (c === "'" || c === '"' || c === '`') {
       i++;
       while (i < source.length && source[i] !== c) i += source[i] === '\\' ? 2 : 1;
       i++;
+      strings.push([start, i]);
       prev = c;
     } else if (c === '/' && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev))) {
       let inClass = false;
@@ -46,20 +48,24 @@ export function blankComments(source) {
         i++;
       }
       i++;
+      strings.push([start, i]);
       prev = '/';
     } else {
       if (!/\s/.test(c)) prev = c;
       i++;
     }
   }
-  return out.join('');
+  return { code: out.join(''), strings };
 }
 
 // The one live (not commented-out) McpServer declaration: { start, end, version, versionStart }.
 // Throws when there is none or more than one, so neither the gate nor set-version can be fooled
-// by an old constructor left in a comment.
+// by an old constructor left in a comment or written inside a string.
 export function serverDeclaration(source) {
-  const live = [...blankComments(source).matchAll(SERVER_DECL)];
+  const { code, strings } = scanSource(source);
+  // Matches in comments are gone from `code`; drop matches that start inside a string literal too
+  // (e.g. const example = "new McpServer({ … })").
+  const live = [...code.matchAll(SERVER_DECL)].filter((m) => !strings.some(([a, b]) => m.index > a && m.index < b));
   if (live.length !== 1) {
     throw new Error(`src/server.js: expected exactly one live McpServer declaration (new McpServer({ name: 'rpi-connect', version: '…' })), found ${live.length}`);
   }
