@@ -112,6 +112,21 @@ jobs:
           curl -fsSL --retry 3 -o mcp-publisher.tar.gz "$MCP_PUBLISHER_URL"
           echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
           tar xzf mcp-publisher.tar.gz mcp-publisher
+      # npm takes a minute or two to show a new version, and the MCP Registry rejects a package
+      # version that npm doesn't show yet (HTTP 400 "version ... was not found"). Wait for it.
+      - name: Wait until npm shows this version
+        run: |
+          name="$(node -p 'require("./package.json").name')"
+          v="$(node -p 'require("./package.json").version')"
+          for i in $(seq 1 40); do
+            if [ "$(npm view "$name@$v" version --prefer-online 2>/dev/null)" = "$v" ]; then
+              echo "$name@$v is visible on npm"; exit 0
+            fi
+            echo "Waiting for $name@$v to appear on npm ($i/40)"
+            sleep 15
+          done
+          echo "::error::$name@$v did not appear on npm within 10 minutes. Check https://www.npmjs.com/package/$name, then Re-run failed jobs."
+          exit 1
       # The same check as in the npm job, again, for a record created in between:
       # absent = publish; same install configuration = skip; conflict, deleted, lookup error = stop.
       - name: Publish to the MCP Registry (skipped if this version is already there)

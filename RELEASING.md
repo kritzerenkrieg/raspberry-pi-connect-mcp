@@ -11,7 +11,8 @@ GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all five version fi
                                         npm ci, npm test
                      ──► npm           npm lookup, then, right before publishing: MCP Registry check
                                         (no conflicting or deleted record), npm publish (trusted publishing + provenance)
-                     ──► mcp-registry  server.json   (mcp-publisher, GitHub OIDC)
+                     ──► mcp-registry  wait until npm shows the version (up to 10 min), then
+                                        server.json   (mcp-publisher, GitHub OIDC)
 ```
 
 Every version published by this workflow has a git tag, a GitHub release and an npm provenance
@@ -195,6 +196,8 @@ To check that the published package starts, run
 | `npm`: `could not compare … with this checkout (diff exit 2)` | The comparison itself failed (e.g. an unreadable file); nothing was published | **Re-run failed jobs**. If it keeps failing, inspect the published tarball (`npm pack raspberry-pi-connect-mcp@X`) |
 | npm `E403 … cannot publish over the previously published versions` | The version appeared on npm between the lookup and the publish | Re-run failed jobs: the lookup then either skips it (same commit) or stops with the message above |
 | npm provenance error about `repository` | `package.json` `repository.url` doesn't match this repo | It must stay `git+https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git` |
+| `mcp-registry`: `… did not appear on npm within 10 minutes` | npm is slow to show the new version (it normally takes a minute or two) | Check the package page on npmjs.com; once the version shows, **Re-run failed jobs** |
+| `mcp-registry`: `400 … NPM package … exists, but version '…' was not found` | The registry checked npm before npm showed the version (the wait step makes this rare) | Wait a minute, then **Re-run failed jobs** |
 | `mcp-registry`: a login/network error from `mcp-publisher` | MCP Registry or GitHub OIDC outage | **Re-run failed jobs**: only `mcp-registry` runs again; npm is not touched |
 | `mcp-registry`: the registry rejects `server.json` | A rule `validate` doesn't cover (rare: `check` already ran it), e.g. the npm package's `mcpName` | A re-run sends the same file again, so it can't fix this. Fix it in a PR, bump to the next patch and release that (the npm version already published stays) |
 | `npm` (preflight) or `mcp-registry`: `already in the MCP Registry with a different install configuration` | The version was published to the registry another way, with different `packages`/`remotes`. The log shows both sides | The registry can't replace it: release the next patch version. In the `npm` job this stops before npm publishes, so npm is untouched |
@@ -254,6 +257,6 @@ next patch instead.
 | 0.0.0-stage | none | none | npm only. A placeholder that reserved the name; npm recorded no commit |
 | 0.1.0 | `v0.1.0` | `ee95810` | npm, by hand |
 | 0.1.1 | `v0.1.1` | `17e5d95` | npm and MCP Registry, by hand |
-| 0.2.0 | `v0.2.0` | | First release through `release.yml` |
+| 0.2.0 | `v0.2.0` | `773e637` | npm (with provenance) and MCP Registry, the first release through `release.yml`. The registry job needed one re-run: it ran before npm showed the version, which the job now waits for |
 
 Each tag points at the commit npm recorded as `gitHead` for that version.
