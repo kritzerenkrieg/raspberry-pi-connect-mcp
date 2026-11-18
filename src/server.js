@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { Connect } from './connect.js';
-import { startLogin, logout, savedSession, loginState } from './auth.js';
+import { startLogin, logout, savedSession, loginState, checkDisplay } from './auth.js';
 
 const connect = new Connect();
 const server = new McpServer({ name: 'rpi-connect', version: '0.2.0' });
@@ -93,6 +93,7 @@ server.tool(
     wait_sec: z.number().int().min(0).max(600).default(180).describe('Seconds to wait for the user to finish'),
   },
   wrap(async ({ fresh, wait_sec }) => {
+    checkDisplay(); // before signing out, so a missing display doesn't cost the current session
     const out = {};
     if (fresh) { await connect.reset(); out.logout = await logout(); }
     const l = startLogin({ onSaved: () => connect.reset() });

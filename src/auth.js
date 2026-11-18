@@ -27,6 +27,15 @@ function stopChrome(chrome) {
   });
 }
 
+// MCP clients may start the server with a minimal environment (the MCP SDK's stdio client passes
+// only HOME, PATH, USER...): without a display Chrome exits at once, so say so instead.
+export function checkDisplay() {
+  if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    throw new Error('No display: DISPLAY/WAYLAND_DISPLAY is not set for the MCP server, so the sign-in window ' +
+      'cannot open. Add "env": {"DISPLAY": ":0"} to the server entry in the MCP client config, or run: npm run login');
+  }
+}
+
 let pending = null; // { startedAt, chrome, promise }
 let lastLogin = null; // result of the last finished login
 
@@ -44,14 +53,17 @@ export function loginState() {
 // to { ok, message } when the session is saved, the window is closed or 10 minutes pass.
 export function startLogin({ onSaved } = {}) {
   if (pending) return { started: false, startedAt: pending.startedAt, promise: pending.promise };
+  checkDisplay();
   fs.mkdirSync(BASE, { recursive: true, mode: 0o700 });
   fs.mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
   const chrome = spawn(
     chromePath(),
     [`--user-data-dir=${PROFILE_DIR}`, `--remote-debugging-port=${PORT}`, '--remote-debugging-address=127.0.0.1',
      '--no-first-run', '--no-default-browser-check', CONNECT_URL],
-    { stdio: 'ignore' },
+    { stdio: ['ignore', 'ignore', 'pipe'] },
   );
+  chrome.stderrTail = '';
+  chrome.stderr.on('data', (d) => { chrome.stderrTail = (chrome.stderrTail + d).slice(-1500); });
   const p = { startedAt: new Date().toISOString(), chrome };
   p.promise = waitForLogin(chrome)
     .catch((e) => ({ ok: false, message: e.message }))
@@ -88,7 +100,16 @@ async function waitForLogin(chrome) {
     return { ok: true, message: `Signed in; saved ${cookies.length} cookies to ${SESSION_FILE}` };
   }
   await stopChrome(chrome);
-  return { ok: false, message: exited ? 'Chrome was closed before sign-in completed. Nothing saved.' : 'Timed out after 10 minutes.' };
+  if (!exited) return { ok: false, message: 'Timed out after 10 minutes.' };
+  const quick = Date.now() - (deadline - LOGIN_TIMEOUT) < 10_000; // exited on its own, not closed by the user
+  const tail = chrome.stderrTail.trim().split('\n').slice(-5).join('\n');
+  return {
+    ok: false,
+    message: quick
+      ? `Chrome exited right after starting (code ${chrome.exitCode ?? chrome.signalCode}). Nothing saved.` +
+        (tail ? `\nChrome output:\n${tail}` : '')
+      : 'Chrome was closed before sign-in completed. Nothing saved.',
+  };
 }
 
 // Signs out: stops a running login, then moves the session file and Chrome profile (which keeps the
@@ -107,7 +128,9 @@ export async function logout({ del = false } = {}) {
     for (const p of items) fs.rmSync(p, { recursive: true, force: true });
     return { signedOut: true, deleted: items };
   }
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').slice(0, 15);
+  const d = new Date(); // local time, so the folder name matches the clock
+  const n = (x) => String(x).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${n(d.getMonth() + 1)}${n(d.getDate())}_${n(d.getHours())}${n(d.getMinutes())}${n(d.getSeconds())}`;
   const dir = path.join(BASE, `old-account_${stamp}`);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   for (const p of items) fs.renameSync(p, path.join(dir, path.basename(p)));
