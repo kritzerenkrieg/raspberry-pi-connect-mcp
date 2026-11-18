@@ -68,7 +68,7 @@ export function decide(status, body, serverJson, error) {
     const what = {
       timeout: 'timed out',
       'invalid-json': `returned HTTP ${status} with a body that is not valid JSON`,
-      body: `returned HTTP ${status} but the body could not be read (connection dropped)`,
+      body: `returned HTTP ${status} but the body could not be read`,
       network: 'could not connect',
     }[error] ?? error;
     return { action: 'stop', message: `MCP Registry lookup ${what} (after retries); not publishing` };
@@ -106,7 +106,8 @@ export async function lookup(serverJson, { fetch = globalThis.fetch, tries = 3, 
       last = { status, body: null };
     } catch (e) {
       // Keep why it failed, for the log: a deadline, a 200 with a broken body, or the connection.
-      // `status` is set once headers arrived, so a later failure is about the body, not the connection.
+      // `status` is set once headers arrived, so a later failure is about reading the body (the
+      // connection closing early, a bad Content-Encoding, ...), not about connecting.
       const error = e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout'
         : e instanceof SyntaxError ? 'invalid-json'
           : status ? 'body' : 'network';
