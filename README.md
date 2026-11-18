@@ -22,7 +22,7 @@ No SSH, port forwarding, VPN or public IP is needed. If the Pi shows up in Conne
 - Fleet-friendly: one agent can work across many devices in parallel
 
 ## Requirements
-- Node.js 18.13+
+- Node.js 18.13+ (on 19.x: 19.3+)
 - A Raspberry Pi Connect account, with **remote shell** enabled on the devices you want to use
 - Chrome for Testing (installed below; no sudo needed)
 
