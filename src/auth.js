@@ -82,34 +82,40 @@ async function waitForLogin(chrome) {
   chrome.on('exit', () => { exited = true; });
   chrome.on('error', () => { exited = true; });
   const deadline = Date.now() + LOGIN_TIMEOUT;
-  while (!exited && Date.now() < deadline) {
-    await sleep(2000);
-    let tabs;
-    try { tabs = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json(); } catch { continue; }
-    if (!tabs.some((t) => t.type === 'page' && loggedIn(t.url))) continue;
+  let browser;
+  try {
+    while (!exited && Date.now() < deadline) {
+      await sleep(2000);
+      let tabs;
+      try { tabs = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json(); } catch { continue; }
+      if (!tabs.some((t) => t.type === 'page' && loggedIn(t.url))) continue;
 
-    await sleep(3000); // let the app finish setting cookies
-    const browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`);
-    const cookies = (await browser.contexts()[0].cookies()).filter((c) => c.domain.includes('raspberrypi.com'));
-    const signedIn = cookies.some((c) => c.name === '_connect_session')
-      && cookies.some((c) => c.domain.includes('id.raspberrypi.com') && ID_COOKIES.includes(c.name));
-    if (!signedIn) { await browser.close().catch(() => {}); continue; }
-    fs.writeFileSync(SESSION_FILE, JSON.stringify({ savedAt: new Date().toISOString(), cookies }, null, 1), { mode: 0o600 });
-    await browser.close().catch(() => {});
-    await stopChrome(chrome);
-    return { ok: true, message: `Signed in; saved ${cookies.length} cookies to ${SESSION_FILE}` };
+      await sleep(3000); // let the app finish setting cookies
+      browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`);
+      const cookies = (await browser.contexts()[0].cookies()).filter((c) => c.domain.includes('raspberrypi.com'));
+      const signedIn = cookies.some((c) => c.name === '_connect_session')
+        && cookies.some((c) => c.domain.includes('id.raspberrypi.com') && ID_COOKIES.includes(c.name));
+      if (!signedIn) { await browser.close().catch(() => {}); browser = null; continue; }
+      fs.writeFileSync(SESSION_FILE, JSON.stringify({ savedAt: new Date().toISOString(), cookies }, null, 1), { mode: 0o600 });
+      return { ok: true, message: `Signed in; saved ${cookies.length} cookies to ${SESSION_FILE}` };
+    }
+    if (!exited) return { ok: false, message: 'Timed out after 10 minutes.' };
+    const quick = Date.now() - (deadline - LOGIN_TIMEOUT) < 10_000; // exited on its own, not closed by the user
+    const tail = chrome.stderrTail.trim().split('\n').slice(-5).join('\n');
+    return {
+      ok: false,
+      message: quick
+        ? `Chrome exited right after starting (code ${chrome.exitCode ?? chrome.signalCode}). Nothing saved.` +
+          (tail ? `\nChrome output:\n${tail}` : '')
+        : 'Chrome was closed before sign-in completed. Nothing saved.',
+    };
+  } finally {
+    try {
+      await browser?.close().catch(() => {});
+    } finally {
+      await stopChrome(chrome);
+    }
   }
-  await stopChrome(chrome);
-  if (!exited) return { ok: false, message: 'Timed out after 10 minutes.' };
-  const quick = Date.now() - (deadline - LOGIN_TIMEOUT) < 10_000; // exited on its own, not closed by the user
-  const tail = chrome.stderrTail.trim().split('\n').slice(-5).join('\n');
-  return {
-    ok: false,
-    message: quick
-      ? `Chrome exited right after starting (code ${chrome.exitCode ?? chrome.signalCode}). Nothing saved.` +
-        (tail ? `\nChrome output:\n${tail}` : '')
-      : 'Chrome was closed before sign-in completed. Nothing saved.',
-  };
 }
 
 // Signs out: stops a running login, then moves the session file and Chrome profile (which keeps the

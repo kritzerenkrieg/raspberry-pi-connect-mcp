@@ -32,9 +32,12 @@ export class Connect {
     const stamp = sessionStamp();
     if (this.ctx && stamp !== this.stamp) await this.reset();
     if (!this.ctx) {
-      this.ctx = await launch();
+      const ctx = await launch();
+      this.ctx = ctx;
       this.stamp = stamp;
-      this.ctx.on('close', () => { this.ctx = null; this.sessions.clear(); });
+      ctx.on('close', () => {
+        if (this.ctx === ctx) { this.ctx = null; this.sessions.clear(); }
+      });
     }
     return this.ctx;
   }
