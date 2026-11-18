@@ -14,29 +14,31 @@ import { fileURLToPath } from 'node:url';
 export const REGISTRY = 'https://registry.modelcontextprotocol.io';
 export const INSTALL_FIELDS = ['name', 'version', 'packages', 'remotes'];
 
-// Canonical form for comparing: sorted keys; drops the values the registry omits when it stores a
-// record (false, null, '', empty arrays/objects) and `format: "string"` (the schema's default).
-// Entries of a `variables` map are kept even when empty: their presence decides URL substitution.
+// Canonical form for comparing, following how the registry (Go, v1.8.9 pkg/model) stores a record:
+// - an object field that is false, '', 0, null, an empty list or an empty map is omitted
+//   (`omitempty` on every optional field: isRequired, isSecret, value, valueHint, choices, ...);
+// - list elements are kept as they are (a '' choice stays a choice);
+// - entries of a `variables` map are kept even when empty (their presence decides substitution);
+// - `format: "string"` equals no format (the schema's default).
+// Objects get sorted keys and a null prototype, so a key like "__proto__" stays an own property.
+const isEmpty = (v) => v === undefined || v === false || v === null || v === '' || v === 0
+  || (Array.isArray(v) && v.length === 0) || (typeof v === 'object' && v && !Array.isArray(v) && Object.keys(v).length === 0);
+
 export function normalize(value, key) {
-  if (key === 'format' && value === 'string') return undefined;
-  if (Array.isArray(value)) {
-    const items = value.map((v) => normalize(v)).filter((v) => v !== undefined);
-    return items.length ? items : undefined;
+  if (Array.isArray(value)) return value.map((v) => (v && typeof v === 'object' ? normalize(v) : v));
+  if (!value || typeof value !== 'object') return value;
+  const out = Object.create(null);
+  for (const k of Object.keys(value).sort()) {
+    const v = normalize(value[k], k);
+    if (key === 'variables') out[k] = v && typeof v === 'object' ? v : Object.create(null);
+    else if (k === 'format' && v === 'string') continue;
+    else if (!isEmpty(v)) out[k] = v;
   }
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const k of Object.keys(value).sort()) {
-      const v = normalize(value[k], k);
-      if (v !== undefined) out[k] = v;
-      else if (key === 'variables' && value[k] && typeof value[k] === 'object') out[k] = {};
-    }
-    return Object.keys(out).length ? out : undefined;
-  }
-  return value === false || value === null || value === '' ? undefined : value;
+  return out;
 }
 
 export function installConfig(server) {
-  return normalize(Object.fromEntries(INSTALL_FIELDS.map((k) => [k, server?.[k]]))) ?? {};
+  return normalize(Object.fromEntries(INSTALL_FIELDS.map((k) => [k, server?.[k]])));
 }
 
 // `record`: the registry's response ({ server, _meta }) or a bare server object.
@@ -65,19 +67,21 @@ export function decide(status, body, serverJson) {
   return { action: 'skip', message: `Version ${v} is already in the MCP Registry (${state}) with this server.json` };
 }
 
-// Exact name + version lookup with retries for network errors and 5xx.
-export async function lookup(serverJson, { fetch = globalThis.fetch, tries = 3, wait = 2000 } = {}) {
+// Exact name + version lookup. Up to `tries` attempts for network errors, timeouts, 429 and 5xx;
+// any other status is returned at once. Each attempt has its own deadline covering the body too.
+export const retryable = (status) => status === 0 || status === 429 || status >= 500;
+export async function lookup(serverJson, { fetch = globalThis.fetch, tries = 3, wait = 2000, timeout = 30_000 } = {}) {
   const url = `${REGISTRY}/v0/servers/${encodeURIComponent(serverJson.name)}/versions/${encodeURIComponent(serverJson.version)}?include_deleted=true`;
   let last = 0;
   for (let i = 0; i < tries; i++) {
     if (i) await new Promise((r) => setTimeout(r, wait));
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
       last = res.status;
       if (res.status === 200) return { status: 200, body: await res.json() };
-      if (res.status < 500) return { status: res.status, body: null };
+      if (!retryable(res.status)) return { status: res.status, body: null };
     } catch {
-      last = 0; // network error: retry
+      last = 0; // network error, timeout or a broken body: retry
     }
   }
   return { status: last, body: null };

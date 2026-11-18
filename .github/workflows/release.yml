@@ -54,10 +54,6 @@ jobs:
         with:
           node-version: 24 # trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0
           registry-url: https://registry.npmjs.org
-      # Before npm uses up the version: stop if the MCP Registry already has this name + version
-      # with a different install configuration, or as deleted (it could then never be published).
-      - name: Check the MCP Registry for a conflicting record
-        run: node scripts/registry-record.mjs server.json
       # Publishes only when npm confirms the version is absent; a failed lookup stops the job.
       # An existing version is accepted only if npm recorded this release's commit as its gitHead
       # and its files equal a package packed from this checkout (a re-run). Anything else stops.
@@ -94,6 +90,9 @@ jobs:
             echo "::error::could not check whether $name@$v is on npm; not publishing"
             exit 1
           fi
+          # Right before npm uses up the version: stop if the MCP Registry has this name + version
+          # with a different install configuration, or as deleted (it could then never be published).
+          node scripts/registry-record.mjs server.json
           npm publish --access public
 
   mcp-registry:
@@ -117,7 +116,9 @@ jobs:
       - name: Publish to the MCP Registry (skipped if this version is already there)
         run: |
           node scripts/registry-record.mjs server.json --out registry-action.txt
-          if [ "$(cat registry-action.txt)" = publish ]; then
-            ./mcp-publisher login github-oidc
-            ./mcp-publisher publish
-          fi
+          action="$(cat registry-action.txt)"
+          case "$action" in
+            publish) ./mcp-publisher login github-oidc && ./mcp-publisher publish ;;
+            skip) ;;
+            *) echo "::error::unexpected registry check result '$action'; not publishing"; exit 1 ;;
+          esac

@@ -9,8 +9,8 @@ GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all five version fi
                                         name in io.github.<repo owner>/
                                         mcp-publisher validate (the registry's own check of server.json)
                                         npm ci, npm test
-                     ──► npm           MCP Registry preflight (no conflicting or deleted record)
-                                        npm publish   (trusted publishing + provenance)
+                     ──► npm           npm lookup, then, right before publishing: MCP Registry check
+                                        (no conflicting or deleted record), npm publish (trusted publishing + provenance)
                      ──► mcp-registry  server.json   (mcp-publisher, GitHub OIDC)
 ```
 
@@ -198,7 +198,8 @@ To check that the published package starts, run
 | `mcp-registry`: the registry rejects `server.json` | A rule `validate` doesn't cover (rare: `check` already ran it), e.g. the npm package's `mcpName` | A re-run sends the same file again, so it can't fix this. Fix it in a PR, bump to the next patch and release that (the npm version already published stays) |
 | `npm` (preflight) or `mcp-registry`: `already in the MCP Registry with a different install configuration` | The version was published to the registry another way, with different `packages`/`remotes`. The log shows both sides | The registry can't replace it: release the next patch version. In the `npm` job this stops before npm publishes, so npm is untouched |
 | `npm` (preflight) or `mcp-registry`: `Version … was deleted from the MCP Registry` | That version was published, then marked deleted; the registry won't take it again | Release the next patch version |
-| `npm` (preflight) or `mcp-registry`: `MCP Registry lookup returned HTTP …` | Registry outage (the lookup already retried 3 times) | **Re-run failed jobs** later |
+| `npm` (preflight) or `mcp-registry`: `MCP Registry lookup returned HTTP 0`, `429` or `5xx` | Network error, timeout (30 s per attempt), rate limit or registry outage. These get up to 3 attempts | **Re-run failed jobs** later |
+| `npm` (preflight) or `mcp-registry`: `MCP Registry lookup returned HTTP` another code (e.g. `401`, `403`, `400`) | Not a transient failure, so it is not retried | Look up the status first (`curl -i` the lookup URL from 2.6). Re-run only once the cause is fixed |
 | `mcp-registry`: sha256 mismatch | The `mcp-publisher` download changed | Don't bypass it. Check the upstream release, then update version and checksum in a PR |
 | `npm test` fails in CI but passes locally | Different Node version (CI uses 24) | Reproduce with Node 24 and fix it on a branch. Nothing was published |
 

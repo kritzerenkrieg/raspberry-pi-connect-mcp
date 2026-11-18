@@ -3,6 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalize, sameInstall, decide, lookup } from '../scripts/registry-record.mjs';
 
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
 const env = (name, extra = {}) => ({ name, description: `about ${name}`, ...extra });
 const local = {
   $schema: 'https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json',
@@ -28,7 +30,7 @@ const record = {
 };
 
 test('normalize drops defaults and sorts keys', () => {
-  assert.deepEqual(normalize({ b: false, a: [{ y: '', x: 1 }], c: [], d: null, e: {} }), { a: [{ x: 1 }] });
+  assert.deepEqual(plain(normalize({ b: false, a: [{ y: '', x: 1 }], c: [], d: null, e: {} })), { a: [{ x: 1 }] });
 });
 
 test('a stored record matches its server.json despite dropped defaults and other metadata', () => {
@@ -60,7 +62,7 @@ test('format "string" is the default; other formats still count', () => {
 
 test('an empty variables entry is kept, so adding one is a difference', () => {
   const remote = (variables) => ({ ...local, remotes: [{ type: 'streamable-http', url: 'https://{region}.x', variables }] });
-  assert.deepEqual(normalize(remote({ region: {} }).remotes), [{ type: 'streamable-http', url: 'https://{region}.x', variables: { region: {} } }]);
+  assert.deepEqual(plain(normalize(remote({ region: {} }).remotes)), [{ type: 'streamable-http', url: 'https://{region}.x', variables: { region: {} } }]);
   assert.equal(sameInstall(remote(undefined), remote({ region: {} })).same, false);
   assert.equal(sameInstall(remote({ region: { isRequired: false } }), remote({ region: {} })).same, true);
 });
@@ -81,12 +83,13 @@ for (const [label, status, body, server, action] of [
   });
 }
 
-test('lookup asks for the exact version including deleted ones, and retries 5xx and network errors', async () => {
+test('lookup asks for the exact version including deleted ones, retries, and its result decides', async () => {
   const urls = [];
   const replies = [() => { throw new Error('down'); }, () => ({ status: 502 }), () => ({ status: 200, json: async () => meta('active') })];
-  const fetch = async (url) => { urls.push(url); return replies[urls.length - 1](); };
+  const fetch = async (url, opts) => { urls.push(url); assert.ok(opts.signal instanceof AbortSignal); return replies[urls.length - 1](); };
   const r = await lookup(local, { fetch, wait: 0 });
   assert.equal(r.status, 200);
+  assert.equal(decide(r.status, r.body, local).action, 'skip');
   assert.equal(urls.length, 3);
   assert.equal(urls[0], 'https://registry.modelcontextprotocol.io/v0/servers/io.github.someone%2Fserver/versions/1.0.0?include_deleted=true');
 });
@@ -95,4 +98,39 @@ test('lookup does not retry a 404', async () => {
   let n = 0;
   const r = await lookup(local, { fetch: async () => { n++; return { status: 404 }; }, wait: 0 });
   assert.deepEqual([r.status, n], [404, 1]);
+});
+
+test('lookup retries 429 and a body that never finishes, then gives up', async () => {
+  let n = 0;
+  const hang = () => ({ status: 200, json: (signal) => new Promise((_, reject) => setTimeout(() => reject(new Error('aborted')), 5)) });
+  const r = await lookup(local, { fetch: async () => (++n === 1 ? { status: 429 } : hang()), wait: 0, timeout: 5 });
+  assert.deepEqual([r.status, n], [0, 3]);
+});
+
+test('lookup does not retry 401', async () => {
+  let n = 0;
+  const r = await lookup(local, { fetch: async () => { n++; return { status: 401 }; }, wait: 0 });
+  assert.deepEqual([r.status, n, decide(r.status, r.body, local).action], [401, 1, 'stop']);
+});
+
+const withInput = (input) => {
+  const s = structuredClone(local);
+  Object.assign(s.packages[0].environmentVariables[0], input);
+  return s;
+};
+
+test('an empty-string choice is kept: adding one is a difference', () => {
+  assert.equal(sameInstall(withInput({ choices: ['auto'] }), withInput({ choices: ['auto', ''] })).same, false);
+  assert.equal(sameInstall(withInput({ choices: [] }), local).same, true, 'an empty list is omitted by the registry');
+});
+
+test('value: "" equals no value, as the registry stores it (Input.Value is omitempty)', () => {
+  assert.equal(sameInstall(withInput({}), withInput({ value: '' })).same, true);
+  assert.equal(sameInstall(withInput({}), withInput({ value: 'x' })).same, false);
+});
+
+test('a variables entry named __proto__ is compared like any other key', () => {
+  const remote = (variables) => ({ ...local, remotes: [{ type: 'streamable-http', url: 'https://{__proto__}.x', variables }] });
+  assert.equal(sameInstall(remote(undefined), remote(JSON.parse('{"__proto__": {}}'))).same, false);
+  assert.equal(sameInstall(remote(JSON.parse('{"__proto__": {}}')), remote(JSON.parse('{"__proto__": {}}'))).same, true);
 });
