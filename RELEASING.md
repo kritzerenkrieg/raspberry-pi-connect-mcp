@@ -5,11 +5,12 @@ A release is one GitHub release, `vX.Y.Z`. Publishing it starts
 three jobs, each starting only if the previous one succeeded:
 
 ```
-GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all six version fields = X.Y.Z; mcpName = server.json name;
+GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all five version fields = X.Y.Z; mcpName = server.json name;
                                         name in io.github.<repo owner>/
                                         mcp-publisher validate (the registry's own check of server.json)
                                         npm ci, npm test
-                     ──► npm           npm publish   (trusted publishing + provenance)
+                     ──► npm           MCP Registry preflight (no conflicting or deleted record)
+                                        npm publish   (trusted publishing + provenance)
                      ──► mcp-registry  server.json   (mcp-publisher, GitHub OIDC)
 ```
 
@@ -101,10 +102,8 @@ git commit -am "chore: release 0.2.1"
 git push -u origin release/v0.2.1
 ```
 
-`set-version` updates the six version fields across four files, and checks that it can find all
-of them before writing any file. In `src/server.js` it uses the one live (not commented-out)
-`new McpServer({ name: 'rpi-connect', version: … })`, and stops if there isn't exactly one. Each file is
-replaced atomically (temporary file, then rename), so a failed write (disk full, permissions) leaves
+`set-version` updates the five version fields across three files, and checks that it can find all
+of them before writing any file. Each file is replaced atomically (temporary file, then rename), so a failed write (disk full, permissions) leaves
 that file intact; it lists which files were already updated. Fix the cause and run the same command
 again:
 
@@ -113,7 +112,9 @@ again:
 | `package.json` | `version` |
 | `package-lock.json` | `version` and `packages[""].version` |
 | `server.json` | `version` and the npm package's `packages[].version` |
-| `src/server.js` | the version the MCP server reports |
+
+The version the MCP server reports is not a field: `src/version.js` reads it from `package.json` at
+startup.
 
 Do not edit these fields by hand. The `check` job refuses to publish if any of them differs from
 the tag, if `package.json` `mcpName` differs from `server.json` `name`, or if `server.json` doesn't
@@ -190,12 +191,14 @@ To check that the published package starts, run
 | `npm`: `could not check whether … is on npm; not publishing` | The npm registry lookup failed (network, outage) | **Re-run failed jobs** later. It never publishes without a confirmed answer |
 | `npm`: `… is already on npm, published from commit '…', not this release's …` | The version was published from a different commit (by hand, or from another release) | Don't reuse the number: release the next patch version. npm users get the other commit's code for this version |
 | `npm`: `… was published from <this commit> but its files differ from this checkout` | Someone published this version by hand from the release commit with uncommitted edits | npm can't replace it: deprecate it (below) and release the next patch version |
+| `npm`: `could not compare … with this checkout (diff exit 2)` | The comparison itself failed (e.g. an unreadable file); nothing was published | **Re-run failed jobs**. If it keeps failing, inspect the published tarball (`npm pack raspberry-pi-connect-mcp@X`) |
 | npm `E403 … cannot publish over the previously published versions` | The version appeared on npm between the lookup and the publish | Re-run failed jobs: the lookup then either skips it (same commit) or stops with the message above |
 | npm provenance error about `repository` | `package.json` `repository.url` doesn't match this repo | It must stay `git+https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git` |
-| `mcp-registry`: `lookup returned HTTP …` or a login/network error | MCP Registry or GitHub OIDC outage | **Re-run failed jobs**: only `mcp-registry` runs again; npm is not touched |
+| `mcp-registry`: a login/network error from `mcp-publisher` | MCP Registry or GitHub OIDC outage | **Re-run failed jobs**: only `mcp-registry` runs again; npm is not touched |
 | `mcp-registry`: the registry rejects `server.json` | A rule `validate` doesn't cover (rare: `check` already ran it), e.g. the npm package's `mcpName` | A re-run sends the same file again, so it can't fix this. Fix it in a PR, bump to the next patch and release that (the npm version already published stays) |
-| `mcp-registry`: `already in the MCP Registry with a different install configuration` | The version was published to the registry another way, with different `packages`/`remotes` | The registry can't replace it: release the next patch version |
-| `mcp-registry`: `Version … was deleted from the MCP Registry` | That version was published, then marked deleted; the registry won't take it again | Release the next patch version |
+| `npm` (preflight) or `mcp-registry`: `already in the MCP Registry with a different install configuration` | The version was published to the registry another way, with different `packages`/`remotes`. The log shows both sides | The registry can't replace it: release the next patch version. In the `npm` job this stops before npm publishes, so npm is untouched |
+| `npm` (preflight) or `mcp-registry`: `Version … was deleted from the MCP Registry` | That version was published, then marked deleted; the registry won't take it again | Release the next patch version |
+| `npm` (preflight) or `mcp-registry`: `MCP Registry lookup returned HTTP …` | Registry outage (the lookup already retried 3 times) | **Re-run failed jobs** later |
 | `mcp-registry`: sha256 mismatch | The `mcp-publisher` download changed | Don't bypass it. Check the upstream release, then update version and checksum in a PR |
 | `npm test` fails in CI but passes locally | Different Node version (CI uses 24) | Reproduce with Node 24 and fix it on a branch. Nothing was published |
 

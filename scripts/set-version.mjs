@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Sets the release version in all six fields (package.json, package-lock.json x2, server.json x2,
-// src/server.js). Every edit is computed and checked before any file is written; each file is
+// Sets the release version in all five fields (package.json, package-lock.json x2, server.json x2). Every edit is computed and checked before any file is written; each file is
 // replaced atomically, and a failed write reports which files were already updated.
 // Usage: npm run set-version -- 0.2.1
 import fs from 'node:fs';

@@ -5,9 +5,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { Connect } from './connect.js';
 import { startLogin, logout, savedSession, loginState, checkCanLogin } from './auth.js';
+import { VERSION } from './version.js';
 
 const connect = new Connect();
-const server = new McpServer({ name: 'rpi-connect', version: '0.2.0' });
+const server = new McpServer({ name: 'rpi-connect', version: VERSION });
 
 const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] });
 const wrap = (fn) => async (args) => {

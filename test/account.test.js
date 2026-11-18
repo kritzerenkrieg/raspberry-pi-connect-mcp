@@ -573,6 +573,7 @@ for (const scenario of ['connect-email', 'id-email', 'no-email', 'device-named-l
 
 async function serverFixture(overrides = {}) {
   const tools = new Map();
+  const serverInfo = [];
   const calls = [];
   const time = clock();
   let savedCallback;
@@ -594,6 +595,7 @@ async function serverFixture(overrides = {}) {
   };
   await load('src/server.js', {
     '@modelcontextprotocol/sdk/server/mcp.js': { McpServer: class {
+      constructor(info) { serverInfo.push(info); }
       tool(name, description, schema, handler) { tools.set(name, { schema: z.object(schema), handler }); }
       async connect() {}
     } },
@@ -601,8 +603,9 @@ async function serverFixture(overrides = {}) {
     zod: { z },
     './connect.js': { Connect: class { constructor() { return connect; } } },
     './auth.js': auth,
+    './version.js': { VERSION: '9.9.9-test' },
   }, { ...time.globals, process: { on() {}, stdin: { on() {} } } });
-  return { tools, calls, connect, time, onSaved: () => savedCallback(),
+  return { tools, calls, connect, time, serverInfo, onSaved: () => savedCallback(),
     async call(name, args = {}) {
       const tool = tools.get(name);
       const result = await tool.handler(tool.schema.parse(args));
@@ -765,4 +768,9 @@ test('browser launch without a saved session points callers to the login tool be
   }, { process: { env: {} } });
   assert.equal(BASE, '/fake/home/.config/rpi-connect-mcp');
   await assert.rejects(launch(), /Not signed in\. Use the login tool/);
+});
+
+test('the MCP server reports the version from src/version.js', async () => {
+  const s = await serverFixture();
+  assert.deepEqual(plain(s.serverInfo), [{ name: 'rpi-connect', version: '9.9.9-test' }]);
 });
