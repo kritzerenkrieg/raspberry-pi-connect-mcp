@@ -1,7 +1,11 @@
 # Publishing a GitHub release (tag vX.Y.Z) publishes that version to npm and the MCP Registry.
 # npm: trusted publishing (OIDC), no token secret; provenance links the package to this run and commit.
 # One-time setup on npmjs.com: package Settings > Trusted Publisher > GitHub Actions,
-# owner kritzerenkrieg, repository raspberry-pi-connect-mcp, workflow release.yml.
+# owner kritzerenkrieg, repository raspberry-pi-connect-mcp, workflow release.yml,
+# Allowed actions: allow npm publish. The first publish must happen within 2 days. See RELEASING.md.
+#
+# Three jobs: check -> npm -> mcp-registry. "Re-run failed jobs" re-runs only the failed job and
+# those after it, and each publish job skips a version that is confirmed to be published already.
 name: Release
 
 on:
@@ -10,55 +14,77 @@ on:
 
 permissions:
   contents: read
-  id-token: write # OIDC token for npm trusted publishing and the MCP Registry
 
 jobs:
-  publish:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24 # npm trusted publishing needs npm >= 11.5.1
-          registry-url: https://registry.npmjs.org
-
-      - name: Check the tag matches every version field
-        run: |
-          v="$(node -p 'require("./package.json").version')"
-          l="$(node -p 'require("./package-lock.json").packages[""].version')"
-          s="$(node -p 'require("./server.json").version')"
-          p="$(node -p 'require("./server.json").packages[0].version')"
-          m="$(sed -nE "s/.*new McpServer\(\{ name: 'rpi-connect', version: '([^']*)'.*/\1/p" src/server.js)"
-          echo "tag=$GITHUB_REF_NAME package.json=$v package-lock=$l server.json=$s server.json npm=$p src/server.js=$m"
-          for x in "$l" "$s" "$p" "$m"; do test "$x" = "$v" || { echo "::error::version fields differ; run: npm run set-version -- $v"; exit 1; }; done
-          test "$GITHUB_REF_NAME" = "v$v" || { echo "::error::tag $GITHUB_REF_NAME does not match package.json version $v"; exit 1; }
-
+          node-version: 24
+      # Tag vX.Y.Z (no pre-releases), six version fields, npm entry in server.json, mcpName.
+      - name: Check the release tag and every version field
+        run: node scripts/check-release.mjs "$GITHUB_REF_NAME"
       - run: npm ci
       - run: npm test
 
-      # Skips a version that is already on npm, so the job can be re-run when a later step failed.
-      - name: Publish to npm
+  npm:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24 # trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0
+          registry-url: https://registry.npmjs.org
+      # Publishes only when npm confirms the version is absent; a failed lookup stops the job.
+      - name: Publish to npm (skipped if this version is already there)
         run: |
+          name="$(node -p 'require("./package.json").name')"
           v="$(node -p 'require("./package.json").version')"
-          if npm view "raspberry-pi-connect-mcp@$v" version >/dev/null 2>&1; then
-            echo "raspberry-pi-connect-mcp@$v is already on npm; skipping"
-          else
-            npm publish --access public
+          if out="$(npm view "$name@$v" version 2>npm-view.err)"; then
+            if [ "$out" = "$v" ]; then echo "$name@$v is already on npm; skipping"; exit 0; fi
+            if [ -n "$out" ]; then echo "::error::unexpected npm view output: $out"; exit 1; fi
+          elif ! grep -q E404 npm-view.err; then
+            cat npm-view.err
+            echo "::error::could not check whether $name@$v is on npm; not publishing"
+            exit 1
           fi
+          npm publish --access public
 
-      # After npm: the registry checks the published package's mcpName against server.json.
-      - name: Publish to the MCP Registry
-        env:
-          MCP_PUBLISHER_VERSION: v1.8.9
+  mcp-registry:
+    needs: npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # MCP Registry login via GitHub OIDC
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.9
+      MCP_PUBLISHER_SHA256: 4d527ca8f1ced0394c962dc925c2a4a4addef441cbefd62501c875e9481823a8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Download mcp-publisher (pinned and checksum-verified)
         run: |
-          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          curl -fsSL --retry 3 -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+      # Exact name + version lookup: 200 = published (skip), 404 = absent (publish), else stop.
+      - name: Publish to the MCP Registry (skipped if this version is already there)
+        run: |
+          name="$(node -p 'encodeURIComponent(require("./server.json").name)')"
           v="$(node -p 'require("./server.json").version')"
-          n="$(node -p 'require("./server.json").name')"
-          if curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=$n" \
-              | V="$v" N="$n" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.exit(JSON.parse(s).servers.some(x=>(x.server||x).name===process.env.N&&(x.server||x).version===process.env.V)?0:1))'; then
-            echo "$n $v is already in the MCP Registry; skipping"
-          else
-            ./mcp-publisher login github-oidc
-            ./mcp-publisher publish
-          fi
+          code="$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' \
+            "https://registry.modelcontextprotocol.io/v0/servers/$name/versions/$v")" || code=000
+          case "$code" in
+            200) echo "Version $v is already in the MCP Registry; skipping" ;;
+            404) ./mcp-publisher login github-oidc && ./mcp-publisher publish ;;
+            *) echo "::error::MCP Registry lookup returned HTTP $code; not publishing"; exit 1 ;;
+          esac

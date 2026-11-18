@@ -1,16 +1,18 @@
 # Releasing
 
 A release is one GitHub release, `vX.Y.Z`. Publishing it starts
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes that exact commit:
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes that exact commit in
+three jobs, each starting only if the previous one succeeded:
 
 ```
-GitHub release vX.Y.Z ──► release.yml ──► 1. check every version field equals X.Y.Z
-                                          2. npm ci, npm test
-                                          3. npm publish        (trusted publishing + provenance)
-                                          4. MCP Registry       (server.json, GitHub OIDC)
+GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all six version fields = X.Y.Z; mcpName = server.json name
+                                        npm ci, npm test
+                     ──► npm           npm publish   (trusted publishing + provenance)
+                     ──► mcp-registry  server.json   (mcp-publisher, GitHub OIDC)
 ```
 
-So every npm version has a git tag, a GitHub release and a provenance record that links them.
+Every version published by this workflow has a git tag, a GitHub release and an npm provenance
+record linking them. Older versions were published by hand (see section 4).
 No npm token is stored anywhere: npm and the MCP Registry trust the workflow through GitHub OIDC.
 
 - npm: <https://www.npmjs.com/package/raspberry-pi-connect-mcp>
@@ -24,7 +26,11 @@ Do this once before the first automated release. Skip it if it is already done.
 
 ### 1.1 npm trusted publisher (required)
 
-Without this, the "Publish to npm" step fails with `E404` or `ENEEDAUTH`.
+Without this, the `npm` job fails with `E404` or `ENEEDAUTH`.
+
+> **Do this at most 2 days before the release.** npm expires a new trusted publisher configuration
+> unless its first successful publish happens within 2 days. If it expired, delete it and create it
+> again.
 
 1. Sign in at <https://www.npmjs.com> as an owner of `raspberry-pi-connect-mcp`.
 2. Open the package → **Settings**.
@@ -36,8 +42,12 @@ Without this, the "Publish to npm" step fails with `E404` or `ENEEDAUTH`.
    | Repository | `raspberry-pi-connect-mcp` |
    | Workflow filename | `release.yml` (just the file name, not the path) |
    | Environment name | leave empty |
+   | Allowed actions | tick **Allow npm publish** |
 
 4. Save the connection.
+
+**Allowed actions** matters: new configurations allow only `npm stage publish` by default, and the
+workflow runs `npm publish`, which npm would then refuse.
 
 Every field must match exactly, including case. If the workflow file is ever renamed, update it here too.
 
@@ -51,6 +61,9 @@ Trusted publishing keeps working, and a leaked npm token can no longer publish t
 
 Nothing to configure. The workflow asks for `id-token: write` itself. The MCP Registry accepts the
 `io.github.kritzerenkrieg/…` name because the workflow runs in the `kritzerenkrieg` repository.
+
+The workflow pins its actions to commit SHAs (version in a comment) and checks the sha256 of the
+`mcp-publisher` download. To update one, change the SHA (or version + checksum) in a PR.
 
 The `main-protection` ruleset still applies to the release PR: one approval and signed commits.
 See step 2.3.
@@ -68,6 +81,9 @@ Use [semver](https://semver.org). While the version is below 1.0:
 | Bug fixes only | patch | `0.2.0` → `0.2.1` |
 | New tools, options or behaviour, or anything that breaks | minor | `0.2.1` → `0.3.0` |
 
+Versions are plain `X.Y.Z`. Pre-release tags such as `v0.3.0-rc.1` are rejected by the `check` job
+(npm would need a separate dist-tag for them), so nothing is published for them.
+
 A version number can be published to npm only once, even if it is later unpublished.
 
 ### 2.2 Set the version on a branch
@@ -75,13 +91,16 @@ A version number can be published to npm only once, even if it is later unpublis
 ```
 git switch main && git pull
 git switch -c release/v0.2.1
+npm ci                          # dependencies for the tests, from the lockfile
 npm run set-version -- 0.2.1
+node scripts/check-release.mjs v0.2.1   # the same gate the workflow runs
 npm test
 git commit -am "chore: release 0.2.1"
 git push -u origin release/v0.2.1
 ```
 
-`set-version` updates all five places the version is written:
+`set-version` updates the six version fields across four files, and checks that it can find all
+of them before writing any file:
 
 | File | Field |
 |---|---|
@@ -90,7 +109,9 @@ git push -u origin release/v0.2.1
 | `server.json` | `version` and the npm package's `packages[].version` |
 | `src/server.js` | the version the MCP server reports |
 
-Do not edit these fields by hand. The workflow refuses to publish if any of them differs from the tag.
+Do not edit these fields by hand. The `check` job refuses to publish if any of them differs from
+the tag, if `package.json` `mcpName` differs from `server.json` `name`, or if `server.json` doesn't
+have exactly one npm entry for this package.
 
 ### 2.3 Open and merge the PR
 
@@ -128,8 +149,8 @@ The tag is always `v` + the version (`v0.2.1`, not `0.2.1`).
 gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
-Or open **Actions → Release**. It takes about a minute. All five steps should be green: version
-check, `npm ci`, `npm test`, Publish to npm, Publish to the MCP Registry.
+Or open **Actions → Release**. It takes a few minutes. All three jobs should be green: `check`,
+`npm`, `mcp-registry`.
 
 ### 2.6 Verify
 
@@ -137,8 +158,8 @@ check, `npm ci`, `npm test`, Publish to npm, Publish to the MCP Registry.
 npm view raspberry-pi-connect-mcp version                       # 0.2.1
 npm view raspberry-pi-connect-mcp@0.2.1 gitHead                 # the release commit
 npm view raspberry-pi-connect-mcp@0.2.1 dist.attestations.url   # set = provenance exists
-curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.kritzerenkrieg/raspberry-pi-connect-mcp" \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>JSON.parse(s).servers.forEach(x=>console.log((x.server||x).version)))'
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "https://registry.modelcontextprotocol.io/v0/servers/io.github.kritzerenkrieg%2Fraspberry-pi-connect-mcp/versions/0.2.1"   # 200
 ```
 
 On the npm page, the version should show a **Provenance** section, "Built and signed on GitHub
@@ -153,17 +174,24 @@ To check that the published package starts, run
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `version fields differ; run: npm run set-version -- X` | A version field was edited by hand, or the bump missed a file | Fix it in a new PR (2.2–2.3), then see "re-release" below |
-| `tag vX does not match package.json version Y` | Release created with the wrong tag, or before the version PR was merged | Delete the release and tag (below), then create it again |
-| npm `E404 Not Found - PUT` / `ENEEDAUTH` | Trusted publisher missing, or a field doesn't match (wrong workflow name, case) | Check 1.1, then **Re-run failed jobs** |
+| `check`: `… is "X", package.json says "Y" (run: npm run set-version -- Y)` | A version field was edited by hand | Fix it in a PR (2.2–2.3), delete the release and tag (below), create it again |
+| `check`: `tag "vX" does not match package.json version Y` | Release created with the wrong tag, or before the version PR was merged | Delete the release and tag (below), then create it again |
+| `check`: `tag "…" is not vX.Y.Z` | A pre-release or malformed tag | Delete it; use a plain `vX.Y.Z` |
+| `check`: `mcpName … differs from server.json name` | One of the two names was changed | Make them equal in a PR. Nothing was published |
+| `npm`: `E404 Not Found - PUT` / `ENEEDAUTH` | Trusted publisher missing or expired, **Allow npm publish** not ticked, or a field doesn't match (workflow name, case) | Check 1.1, then **Re-run failed jobs** |
+| `npm`: `could not check whether … is on npm; not publishing` | The npm registry lookup failed (network, outage) | **Re-run failed jobs** later. It never publishes without a confirmed answer |
 | npm `E403 … cannot publish over the previously published versions` | That version is already on npm | Normally the step skips it. If you see this, the version was published another way: bump to the next patch |
 | npm provenance error about `repository` | `package.json` `repository.url` doesn't match this repo | It must stay `git+https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git` |
-| MCP Registry step fails after npm succeeded | Registry outage, or `server.json` invalid for its schema | Fix `server.json` if needed, then **Re-run failed jobs**. The npm step skips the version that's already published |
-| MCP Registry: `mcpName` mismatch | `package.json` `mcpName` ≠ `server.json` `name` | Both must be `io.github.kritzerenkrieg/raspberry-pi-connect-mcp` |
+| `mcp-registry`: `lookup returned HTTP …` or a login/network error | MCP Registry or GitHub OIDC outage | **Re-run failed jobs**: only `mcp-registry` runs again; npm is not touched |
+| `mcp-registry`: the registry rejects `server.json` (schema/validation) | Invalid metadata in the release commit | A re-run sends the same file again, so it can't fix this. Fix `server.json` in a PR, bump to the next patch and release that (the npm version already published stays) |
+| `mcp-registry`: sha256 mismatch | The `mcp-publisher` download changed | Don't bypass it. Check the upstream release, then update version and checksum in a PR |
 | `npm test` fails in CI but passes locally | Different Node version (CI uses 24) | Reproduce with Node 24 and fix it on a branch. Nothing was published |
 
-**Re-running:** open the failed run → **Re-run failed jobs**. It re-runs the same commit and tag.
-Steps that already published are skipped, so re-running is always safe.
+**Re-running:** open the failed run → **Re-run failed jobs**. GitHub re-runs only the failed job and
+the ones after it, on the same commit and tag; jobs that already succeeded keep their result. Each
+publish job also skips a version it confirms is already published. Re-running helps with *transient*
+failures (outages, a missing npm setting). It can't fix anything in the release commit itself: for
+that, fix it in a PR and release the next patch version.
 
 **Deleting a release and tag**, for example after a wrong tag, *before* anything was published:
 
