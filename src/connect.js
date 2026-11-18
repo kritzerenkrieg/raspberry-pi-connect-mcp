@@ -1,5 +1,8 @@
 // Drives Raspberry Pi Connect's web remote shell (xterm.js over WebRTC) with a headless browser.
-import { launch, CONNECT_URL } from './browser.js';
+import fs from 'node:fs';
+import { launch, CONNECT_URL, SESSION_FILE } from './browser.js';
+
+const sessionStamp = () => { try { return fs.statSync(SESSION_FILE).mtimeMs; } catch { return null; } };
 
 const CONNECT_TIMEOUT = 120_000; // relay connections can take ~30s to come up
 
@@ -16,7 +19,10 @@ export function stripAnsi(s) {
 }
 
 class ExpiredError extends Error {
-  constructor() { super('Raspberry Pi Connect session expired. Ask the user to run: node scripts/login.js'); }
+  constructor() {
+    super('Raspberry Pi Connect session expired. Use the login tool, then ask the user to sign in in the Chrome window.');
+    this.expired = true; // lets callers tell an invalid session from a network error
+  }
 }
 
 export class Connect {
@@ -24,12 +30,35 @@ export class Connect {
   sessions = new Map(); // deviceId -> { page, name, queue }
   devicesCache = null;
 
+  launching = null; // promise of a browser launch in progress, shared by concurrent callers
+  generation = 0; // bumped by reset(), so a launch that was in progress when it ran is discarded
+
   async context() {
-    if (!this.ctx) {
-      this.ctx = await launch();
-      this.ctx.on('close', () => { this.ctx = null; this.sessions.clear(); });
+    for (;;) {
+      // Reload when the session file changed (login/logout from the tools or a terminal): no reconnect needed.
+      const stamp = sessionStamp();
+      if (this.ctx && stamp !== this.stamp) await this.reset();
+      if (this.ctx) return this.ctx;
+      if (!this.launching) {
+        const generation = this.generation;
+        this.launching = (async () => {
+          try {
+            const ctx = await launch();
+            // reset() ran during the launch: this browser may hold the old session, so close it and
+            // let the loop launch again with the current session file.
+            if (generation !== this.generation) { await ctx.close().catch(() => {}); return; }
+            this.ctx = ctx;
+            this.stamp = stamp;
+            ctx.on('close', () => {
+              if (this.ctx === ctx) { this.ctx = null; this.sessions.clear(); }
+            });
+          } finally {
+            this.launching = null;
+          }
+        })();
+      }
+      await this.launching;
     }
-    return this.ctx;
   }
 
   async listDevices() {
@@ -75,11 +104,15 @@ export class Connect {
   }
 
   async resolve(device) {
-    const devices = this.devicesCache || (await this.listDevices());
+    if (sessionStamp() !== this.stamp) this.devicesCache = null; // account may have changed
+    const cached = this.devicesCache;
+    const devices = cached || (await this.listDevices());
     const q = device.trim().toLowerCase();
     let m = devices.filter((d) => d.id === q || d.name.toLowerCase() === q);
     if (!m.length) m = devices.filter((d) => d.name.toLowerCase().includes(q));
-    if (m.length === 0 && this.devicesCache) { this.devicesCache = null; return this.resolve(device); }
+    // Not found in a cached list: it may be new, so fetch once more. (A fresh list also fills the cache,
+    // so test where this list came from; testing the cache here looped forever on an unknown device.)
+    if (m.length === 0 && cached) { this.devicesCache = null; return this.resolve(device); }
     if (m.length === 0) throw new Error(`No device matches "${device}". Use list_devices.`);
     if (m.length > 1) throw new Error(`"${device}" is ambiguous: ${m.map((d) => d.name).join(', ')}`);
     const d = m[0];
@@ -124,6 +157,9 @@ export class Connect {
     });
     const s = { page, name: d.name, id: d.id, queue: Promise.resolve(), seq: 0 };
     this.sessions.set(d.id, s);
+    // The terminal shows before the shell has connected, and keystrokes sent then can be dropped
+    // (the command never runs; only prompts come back). Wait for the shell's first output, its prompt.
+    await page.waitForFunction(() => window.__out.length > 0, null, { timeout: 20_000 }).catch(() => {});
     await page.waitForTimeout(500);
     // Non-interactive-friendly defaults for this shell only.
     await this.input(s, ' export PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat SYSTEMD_COLORS=0\n');
@@ -216,6 +252,43 @@ export class Connect {
     await s.page.close().catch(() => {});
     this.sessions.delete(d.id);
     return true;
+  }
+
+  // Drop the browser, shell sessions and device cache, so the next call loads the current session file.
+  async reset() {
+    this.generation++;
+    const ctx = this.ctx;
+    this.ctx = null;
+    this.sessions.clear();
+    this.devicesCache = null;
+    await ctx?.close().catch(() => {});
+  }
+
+  // Best effort: the signed-in account's email, from the user menu of the Connect page, else of the
+  // Raspberry Pi ID page. Only the user menu counts (a device may be named like an email); else null.
+  async accountEmail() {
+    const ctx = await this.context();
+    const page = await ctx.newPage();
+    const find = () => page.evaluate(() => {
+      const re = /[\w.+-]+@[\w-]+(\.[\w-]+)+/;
+      for (const el of document.querySelectorAll('[id*="user-menu"], [class*="user-menu"]')) {
+        const m = (el.textContent || '').match(re); // textContent: the menu is usually collapsed (hidden)
+        if (m) return m[0];
+      }
+      return null;
+    });
+    try {
+      await page.goto(`${CONNECT_URL}/devices`, { waitUntil: 'domcontentloaded' });
+      if (page.url().includes('/sign-in')) throw new ExpiredError();
+      let email = await find();
+      if (!email) {
+        await page.goto('https://id.raspberrypi.com/profile', { waitUntil: 'domcontentloaded' }).catch(() => {});
+        email = await find().catch(() => null);
+      }
+      return email;
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
 
   async shutdown() {
