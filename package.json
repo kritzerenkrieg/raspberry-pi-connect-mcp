@@ -12,7 +12,8 @@
   "scripts": {
     "start": "node src/server.js",
     "login": "node scripts/login.js",
-    "test": "node --experimental-vm-modules --test"
+    "test": "node --experimental-vm-modules --test",
+    "set-version": "node scripts/set-version.mjs"
   },
   "keywords": [
     "mcp",

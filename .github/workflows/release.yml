@@ -23,19 +23,29 @@ jobs:
           node-version: 24 # npm trusted publishing needs npm >= 11.5.1
           registry-url: https://registry.npmjs.org
 
-      - name: Check the tag matches package.json and server.json
+      - name: Check the tag matches every version field
         run: |
           v="$(node -p 'require("./package.json").version')"
+          l="$(node -p 'require("./package-lock.json").packages[""].version')"
           s="$(node -p 'require("./server.json").version')"
           p="$(node -p 'require("./server.json").packages[0].version')"
-          echo "tag=$GITHUB_REF_NAME package.json=$v server.json=$s server.json package=$p"
-          test "$GITHUB_REF_NAME" = "v$v" && test "$s" = "$v" && test "$p" = "$v"
+          m="$(sed -nE "s/.*new McpServer\(\{ name: 'rpi-connect', version: '([^']*)'.*/\1/p" src/server.js)"
+          echo "tag=$GITHUB_REF_NAME package.json=$v package-lock=$l server.json=$s server.json npm=$p src/server.js=$m"
+          for x in "$l" "$s" "$p" "$m"; do test "$x" = "$v" || { echo "::error::version fields differ; run: npm run set-version -- $v"; exit 1; }; done
+          test "$GITHUB_REF_NAME" = "v$v" || { echo "::error::tag $GITHUB_REF_NAME does not match package.json version $v"; exit 1; }
 
       - run: npm ci
       - run: npm test
 
+      # Skips a version that is already on npm, so the job can be re-run when a later step failed.
       - name: Publish to npm
-        run: npm publish --access public
+        run: |
+          v="$(node -p 'require("./package.json").version')"
+          if npm view "raspberry-pi-connect-mcp@$v" version >/dev/null 2>&1; then
+            echo "raspberry-pi-connect-mcp@$v is already on npm; skipping"
+          else
+            npm publish --access public
+          fi
 
       # After npm: the registry checks the published package's mcpName against server.json.
       - name: Publish to the MCP Registry
@@ -43,5 +53,12 @@ jobs:
           MCP_PUBLISHER_VERSION: v1.8.9
         run: |
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
-          ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+          v="$(node -p 'require("./server.json").version')"
+          n="$(node -p 'require("./server.json").name')"
+          if curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=$n" \
+              | V="$v" N="$n" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.exit(JSON.parse(s).servers.some(x=>(x.server||x).name===process.env.N&&(x.server||x).version===process.env.V)?0:1))'; then
+            echo "$n $v is already in the MCP Registry; skipping"
+          else
+            ./mcp-publisher login github-oidc
+            ./mcp-publisher publish
+          fi
