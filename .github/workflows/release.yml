@@ -1,0 +1,47 @@
+# Publishing a GitHub release (tag vX.Y.Z) publishes that version to npm and the MCP Registry.
+# npm: trusted publishing (OIDC), no token secret; provenance links the package to this run and commit.
+# One-time setup on npmjs.com: package Settings > Trusted Publisher > GitHub Actions,
+# owner kritzerenkrieg, repository raspberry-pi-connect-mcp, workflow release.yml.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing and the MCP Registry
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24 # npm trusted publishing needs npm >= 11.5.1
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the tag matches package.json and server.json
+        run: |
+          v="$(node -p 'require("./package.json").version')"
+          s="$(node -p 'require("./server.json").version')"
+          p="$(node -p 'require("./server.json").packages[0].version')"
+          echo "tag=$GITHUB_REF_NAME package.json=$v server.json=$s server.json package=$p"
+          test "$GITHUB_REF_NAME" = "v$v" && test "$s" = "$v" && test "$p" = "$v"
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Publish to npm
+        run: npm publish --access public
+
+      # After npm: the registry checks the published package's mcpName against server.json.
+      - name: Publish to the MCP Registry
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.9
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
