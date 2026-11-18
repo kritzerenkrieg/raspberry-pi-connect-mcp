@@ -6,6 +6,7 @@ three jobs, each starting only if the previous one succeeded:
 
 ```
 GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all six version fields = X.Y.Z; mcpName = server.json name
+                                        mcp-publisher validate (the registry's own check of server.json)
                                         npm ci, npm test
                      ──► npm           npm publish   (trusted publishing + provenance)
                      ──► mcp-registry  server.json   (mcp-publisher, GitHub OIDC)
@@ -100,7 +101,10 @@ git push -u origin release/v0.2.1
 ```
 
 `set-version` updates the six version fields across four files, and checks that it can find all
-of them before writing any file:
+of them before writing any file. In `src/server.js` it uses the one live (not commented-out)
+`new McpServer({ name: 'rpi-connect', version: … })`, and stops if there isn't exactly one. If a write
+itself fails (disk full, permissions), it lists which files were already updated; fix the cause and
+run the same command again:
 
 | File | Field |
 |---|---|
@@ -174,16 +178,19 @@ To check that the published package starts, run
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `check`: `… is "X", package.json says "Y" (run: npm run set-version -- Y)` | A version field was edited by hand | Fix it in a PR (2.2–2.3), delete the release and tag (below), create it again |
+| `check`: `… is "X", package.json says "Y" (run: npm run set-version -- Y)` | A version field was edited by hand | See **Fixing a release that failed in `check`** below |
 | `check`: `tag "vX" does not match package.json version Y` | Release created with the wrong tag, or before the version PR was merged | Delete the release and tag (below), then create it again |
 | `check`: `tag "…" is not vX.Y.Z` | A pre-release or malformed tag | Delete it; use a plain `vX.Y.Z` |
-| `check`: `mcpName … differs from server.json name` | One of the two names was changed | Make them equal in a PR. Nothing was published |
+| `check`: `mcpName … differs from server.json name` | One of the two names was changed | Make them equal in a PR, then see **Fixing a release that failed in `check`** below |
+| `check`: `Validate server.json` fails | `server.json` breaks the registry's schema or rules (e.g. a missing `description`) | Fix `server.json` in a PR, then see **Fixing a release that failed in `check`** below |
 | `npm`: `E404 Not Found - PUT` / `ENEEDAUTH` | Trusted publisher missing or expired, **Allow npm publish** not ticked, or a field doesn't match (workflow name, case) | Check 1.1, then **Re-run failed jobs** |
 | `npm`: `could not check whether … is on npm; not publishing` | The npm registry lookup failed (network, outage) | **Re-run failed jobs** later. It never publishes without a confirmed answer |
-| npm `E403 … cannot publish over the previously published versions` | That version is already on npm | Normally the step skips it. If you see this, the version was published another way: bump to the next patch |
+| `npm`: `… is already on npm, published from commit '…', not this release's …` | The version was published from a different commit (by hand, or from another release) | Don't reuse the number: release the next patch version. npm users get the other commit's code for this version |
+| npm `E403 … cannot publish over the previously published versions` | The version appeared on npm between the lookup and the publish | Re-run failed jobs: the lookup then either skips it (same commit) or stops with the message above |
 | npm provenance error about `repository` | `package.json` `repository.url` doesn't match this repo | It must stay `git+https://github.com/kritzerenkrieg/raspberry-pi-connect-mcp.git` |
 | `mcp-registry`: `lookup returned HTTP …` or a login/network error | MCP Registry or GitHub OIDC outage | **Re-run failed jobs**: only `mcp-registry` runs again; npm is not touched |
-| `mcp-registry`: the registry rejects `server.json` (schema/validation) | Invalid metadata in the release commit | A re-run sends the same file again, so it can't fix this. Fix `server.json` in a PR, bump to the next patch and release that (the npm version already published stays) |
+| `mcp-registry`: the registry rejects `server.json` | A rule `validate` doesn't cover (rare: `check` already ran it), e.g. the npm package's `mcpName` | A re-run sends the same file again, so it can't fix this. Fix it in a PR, bump to the next patch and release that (the npm version already published stays) |
+| `mcp-registry`: `Version … was deleted from the MCP Registry` | That version was published, then marked deleted; the registry won't take it again | Release the next patch version |
 | `mcp-registry`: sha256 mismatch | The `mcp-publisher` download changed | Don't bypass it. Check the upstream release, then update version and checksum in a PR |
 | `npm test` fails in CI but passes locally | Different Node version (CI uses 24) | Reproduce with Node 24 and fix it on a branch. Nothing was published |
 
@@ -192,6 +199,16 @@ the ones after it, on the same commit and tag; jobs that already succeeded keep 
 publish job also skips a version it confirms is already published. Re-running helps with *transient*
 failures (outages, a missing npm setting). It can't fix anything in the release commit itself: for
 that, fix it in a PR and release the next patch version.
+
+**Fixing a release that failed in `check`:** nothing was published, but the tag still points at the
+old commit, and merging a fix doesn't start a new run. After the fix is merged to `main`:
+
+1. Delete the release and its tag: `gh release delete v0.2.1 --yes --cleanup-tag`.
+2. Create the release again from `main` (2.4). That makes a new tag on the fixed commit and a new run.
+
+Reusing the same version is fine here because neither npm nor the MCP Registry has it. Check first
+if unsure: `npm view raspberry-pi-connect-mcp@0.2.1 version` should fail with `E404`, and the
+registry lookup in 2.6 should print `404`. If either has it, release the next patch version instead.
 
 **Deleting a release and tag**, for example after a wrong tag, *before* anything was published:
 

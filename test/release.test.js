@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { load, fields, releaseProblems, withVersion } from '../scripts/versions.mjs';
 
-const repo = new URL('..', import.meta.url).pathname;
+const repo = fileURLToPath(new URL('..', import.meta.url));
 const FILES = ['package.json', 'package-lock.json', 'server.json', 'src/server.js'];
 
 // A temporary copy of the four version files, edited by `edit(json, text)` before loading.
@@ -39,9 +40,16 @@ test('gate rejects a tag for another version', () => {
   assert.match(releaseProblems(load(repo), 'v99.0.0').join('\n'), /does not match package.json version/);
 });
 
-test('gate checks both package-lock.json version fields', (t) => {
+test('gate checks the top-level package-lock.json version', (t) => {
   const root = fixture(t, (j) => { j['package-lock.json'].version = '0.0.1'; });
   assert.match(releaseProblems(load(root), `v${v}`).join('\n'), /package-lock.json version is "0.0.1"/);
+});
+
+test('gate checks the package-lock.json packages[""] version', (t) => {
+  const root = fixture(t, (j) => { j['package-lock.json'].packages[''].version = '0.0.2'; });
+  const problems = releaseProblems(load(root), `v${v}`);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /package-lock.json packages\[""\]\.version is "0.0.2"/);
 });
 
 test('gate finds the npm entry by type and name, not position', (t) => {
@@ -76,9 +84,33 @@ for (const bad of ['0.2.1-rc..1', '0.2.1-rc.1', '01.2.3', '1.2', 'v1.2.3', '']) 
   });
 }
 
-test('withVersion throws before any write when a field is missing', (t) => {
-  const root = fixture(t, (j, text) => { text['src/server.js'] = text['src/server.js'].replace("{ name: 'rpi-connect', version:", "{\n  name: 'rpi-connect',\n  version:"); });
+const DECL = `new McpServer({ name: 'rpi-connect', version: '${v}' })`;
+const editServer = (fn) => (j, text) => {
+  assert.ok(text['src/server.js'].includes(DECL));
+  text['src/server.js'] = fn(text['src/server.js']);
+};
+
+test('withVersion throws before any write when the McpServer declaration is missing', (t) => {
+  const root = fixture(t, editServer((src) => src.replace(DECL, `new McpServer({ name: 'other', version: '${v}' })`)));
   const before = FILES.map((f) => fs.readFileSync(path.join(root, f), 'utf8'));
-  assert.throws(() => withVersion(load(root), '1.2.3'), /McpServer version line not found/);
+  assert.throws(() => withVersion(load(root), '1.2.3'), /expected exactly one live McpServer declaration .* found 0/);
   assert.deepEqual(FILES.map((f) => fs.readFileSync(path.join(root, f), 'utf8')), before);
+});
+
+test('gate and set-version use the live declaration, not a commented-out one', (t) => {
+  const live = `new McpServer({\n  name: "rpi-connect",\n  version: "0.0.9",\n})`.replace(',\n})', '\n})');
+  for (const comment of [(d) => `// ${d}`, (d) => `/* ${d} */`]) {
+    const root = fixture(t, editServer((src) => src.replace(DECL, `${comment(DECL)}\nconst server = ${live};`).replace('const server = new', 'const server0 = new')));
+    assert.match(releaseProblems(load(root), `v${v}`).join('\n'), /src\/server.js McpServer version is "0.0.9"/);
+    for (const [f, content] of Object.entries(withVersion(load(root), '1.2.3'))) fs.writeFileSync(path.join(root, f), content);
+    const src = fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
+    assert.ok(src.includes(comment(DECL)), 'the comment is left alone');
+    assert.ok(src.includes('version: "1.2.3"'), 'the live declaration is updated, keeping its quotes');
+    assert.deepEqual(releaseProblems(load(root), 'v1.2.3'), []);
+  }
+});
+
+test('gate rejects two live McpServer declarations', (t) => {
+  const root = fixture(t, editServer((src) => src.replace(DECL, `${DECL}; const other = ${DECL}`)));
+  assert.match(releaseProblems(load(root), `v${v}`).join('\n'), /found 2/);
 });

@@ -6,7 +6,25 @@ import path from 'node:path';
 
 // Releases are plain X.Y.Z: no pre-releases (npm would need a dist-tag, and the workflow has none).
 export const RELEASE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const SERVER_VERSION = /(new McpServer\(\{ name: 'rpi-connect', version: ')([^']*)('\s*\}\))/;
+// The McpServer declaration in src/server.js, single or double quotes, possibly over several lines.
+const SERVER_DECL = /new McpServer\(\{\s*name:\s*(['"])rpi-connect\1,\s*version:\s*(['"])([^'"]*)\2\s*\}\)/g;
+
+// The one live (not commented-out) McpServer declaration: { start, end, version, text }.
+// Throws when there is none or more than one, so neither the gate nor set-version can be fooled
+// by an old constructor left in a comment.
+export function serverDeclaration(source) {
+  const comments = [...source.matchAll(/\/\*[\s\S]*?\*\//g)].map((m) => [m.index, m.index + m[0].length]);
+  const live = [...source.matchAll(SERVER_DECL)].filter((m) => {
+    const lineStart = source.lastIndexOf('\n', m.index) + 1;
+    if (source.slice(lineStart, m.index).includes('//')) return false;
+    return !comments.some(([a, b]) => m.index >= a && m.index < b);
+  });
+  if (live.length !== 1) {
+    throw new Error(`src/server.js: expected exactly one live McpServer declaration (new McpServer({ name: 'rpi-connect', version: '…' })), found ${live.length}`);
+  }
+  const m = live[0];
+  return { start: m.index, end: m.index + m[0].length, version: m[3], text: m[0], quote: m[2] };
+}
 
 const read = (root, p) => fs.readFileSync(path.join(root, p), 'utf8');
 
@@ -35,8 +53,7 @@ export function npmEntry(s) {
 }
 
 export function fields(s) {
-  const src = SERVER_VERSION.exec(s.text['src/server.js']);
-  if (!src) throw new Error("src/server.js: McpServer version line not found (new McpServer({ name: 'rpi-connect', version: '…' }))");
+  const decl = serverDeclaration(s.text['src/server.js']);
   if (!s.lock.packages?.['']) throw new Error('package-lock.json: packages[""] missing');
   return [
     ['package.json version', s.pkg.version],
@@ -44,7 +61,7 @@ export function fields(s) {
     ['package-lock.json packages[""].version', s.lock.packages[''].version],
     ['server.json version', s.server.version],
     ['server.json npm package version', npmEntry(s).version],
-    ['src/server.js McpServer version', src[2]],
+    ['src/server.js McpServer version', decl.version],
   ];
 }
 
@@ -78,10 +95,14 @@ export function withVersion(s, version) {
   lock.packages[''].version = version;
   server.version = version;
   npmEntry({ ...s, server }).version = version;
+  const src = s.text['src/server.js'];
+  const decl = serverDeclaration(src);
+  const q = decl.quote;
+  const newDecl = decl.text.replace(new RegExp(`(version:\\s*)${q}[^'"]*${q}`), `$1${q}${version}${q}`);
   return {
     'package.json': json(pkg),
     'package-lock.json': json(lock),
     'server.json': json(server),
-    'src/server.js': s.text['src/server.js'].replace(SERVER_VERSION, `$1${version}$3`),
+    'src/server.js': src.slice(0, decl.start) + newDecl + src.slice(decl.end),
   };
 }
