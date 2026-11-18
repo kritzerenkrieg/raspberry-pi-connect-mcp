@@ -61,11 +61,16 @@ export function sameInstall(record, serverJson) {
 }
 
 // From the lookup's result: { action: 'publish' | 'skip' | 'stop', message }.
-// `error`: why the last attempt failed ('timeout', 'invalid-json' or 'network'), if it did.
+// `error`: why the last attempt failed ('timeout', 'invalid-json', 'body' or 'network'), if it did.
 export function decide(status, body, serverJson, error) {
   const v = serverJson.version;
   if (error) {
-    const what = { timeout: 'timed out', 'invalid-json': `returned HTTP ${status} with a body that is not valid JSON`, network: 'could not connect' }[error] ?? error;
+    const what = {
+      timeout: 'timed out',
+      'invalid-json': `returned HTTP ${status} with a body that is not valid JSON`,
+      body: `returned HTTP ${status} but the body could not be read (connection dropped)`,
+      network: 'could not connect',
+    }[error] ?? error;
     return { action: 'stop', message: `MCP Registry lookup ${what} (after retries); not publishing` };
   }
   if (status === 404) return { action: 'publish', message: `Version ${v} is not in the MCP Registry` };
@@ -101,7 +106,10 @@ export async function lookup(serverJson, { fetch = globalThis.fetch, tries = 3, 
       last = { status, body: null };
     } catch (e) {
       // Keep why it failed, for the log: a deadline, a 200 with a broken body, or the connection.
-      const error = e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout' : e instanceof SyntaxError ? 'invalid-json' : 'network';
+      // `status` is set once headers arrived, so a later failure is about the body, not the connection.
+      const error = e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout'
+        : e instanceof SyntaxError ? 'invalid-json'
+          : status ? 'body' : 'network';
       last = { status, body: null, error };
     }
   }

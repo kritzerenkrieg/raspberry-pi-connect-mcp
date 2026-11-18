@@ -107,8 +107,20 @@ const stalled = (signal) => ({
 });
 
 test('lookup retries 429 and a body that never finishes, then reports a timeout', async () => {
+  // AbortSignal.timeout() uses an unref'ed timer: keep the event loop alive with a referenced
+  // watchdog, which also fails the test if the deadline never ends the body.
+  let watchdog;
+  const deadline = new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error('the request deadline never fired')), 5000); });
   let n = 0;
-  const r = await lookup(local, { fetch: async (url, { signal }) => (++n === 1 ? { status: 429 } : stalled(signal)), wait: 0, timeout: 20 });
+  let r;
+  try {
+    r = await Promise.race([
+      lookup(local, { fetch: async (url, { signal }) => (++n === 1 ? { status: 429 } : stalled(signal)), wait: 0, timeout: 20 }),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(watchdog);
+  }
   assert.equal(n, 3);
   assert.equal(r.error, 'timeout');
   assert.match(decide(r.status, r.body, local, r.error).message, /timed out/);
@@ -120,6 +132,12 @@ test('lookup reports a 200 with invalid JSON as such, not as a connection failur
   const d = decide(r.status, r.body, local, r.error);
   assert.equal(d.action, 'stop');
   assert.match(d.message, /HTTP 200 with a body that is not valid JSON/);
+});
+
+test('lookup reports a body that breaks after HTTP 200 as a body failure, not a connection failure', async () => {
+  const r = await lookup(local, { fetch: async () => ({ status: 200, json: async () => { throw new TypeError('terminated'); } }), wait: 0 });
+  assert.deepEqual([r.status, r.error], [200, 'body']);
+  assert.match(decide(r.status, r.body, local, r.error).message, /HTTP 200 but the body could not be read/);
 });
 
 test('lookup reports a refused connection as a network error', async () => {
