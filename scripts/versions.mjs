@@ -6,24 +6,66 @@ import path from 'node:path';
 
 // Releases are plain X.Y.Z: no pre-releases (npm would need a dist-tag, and the workflow has none).
 export const RELEASE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-// The McpServer declaration in src/server.js, single or double quotes, possibly over several lines.
-const SERVER_DECL = /new McpServer\(\{\s*name:\s*(['"])rpi-connect\1,\s*version:\s*(['"])([^'"]*)\2\s*\}\)/g;
+// The McpServer declaration in src/server.js: single or double quotes, possibly over several lines,
+// optional trailing comma. Groups: 3 = text up to the version's opening quote, 4 = version.
+const SERVER_DECL = /(new McpServer\(\{\s*name:\s*(['"])rpi-connect\2,\s*version:\s*(['"]))([^'"]*)\3\s*,?\s*\}\)/g;
 
-// The one live (not commented-out) McpServer declaration: { start, end, version, text }.
+// `source` with every comment replaced by spaces (same length, so offsets still match). A small
+// JavaScript scanner: it knows strings, template literals and regex literals, so a `//` inside
+// 'https://…' or /a\/\// is not taken for a comment.
+export function blankComments(source) {
+  const out = source.split('');
+  let i = 0;
+  let prev = ''; // last significant character, to tell a regex literal from division
+  const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== '\n') out[k] = ' '; };
+  while (i < source.length) {
+    const c = source[i];
+    const n = source[i + 1];
+    if (c === '/' && n === '/') {
+      const end = source.indexOf('\n', i);
+      const stop = end === -1 ? source.length : end;
+      blank(i, stop);
+      i = stop;
+    } else if (c === '/' && n === '*') {
+      const end = source.indexOf('*/', i + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      blank(i, stop);
+      i = stop;
+    } else if (c === "'" || c === '"' || c === '`') {
+      i++;
+      while (i < source.length && source[i] !== c) i += source[i] === '\\' ? 2 : 1;
+      i++;
+      prev = c;
+    } else if (c === '/' && (prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev))) {
+      let inClass = false;
+      i++;
+      while (i < source.length && source[i] !== '\n' && (inClass || source[i] !== '/')) {
+        if (source[i] === '\\') i++;
+        else if (source[i] === '[') inClass = true;
+        else if (source[i] === ']') inClass = false;
+        i++;
+      }
+      i++;
+      prev = '/';
+    } else {
+      if (!/\s/.test(c)) prev = c;
+      i++;
+    }
+  }
+  return out.join('');
+}
+
+// The one live (not commented-out) McpServer declaration: { start, end, version, versionStart }.
 // Throws when there is none or more than one, so neither the gate nor set-version can be fooled
 // by an old constructor left in a comment.
 export function serverDeclaration(source) {
-  const comments = [...source.matchAll(/\/\*[\s\S]*?\*\//g)].map((m) => [m.index, m.index + m[0].length]);
-  const live = [...source.matchAll(SERVER_DECL)].filter((m) => {
-    const lineStart = source.lastIndexOf('\n', m.index) + 1;
-    if (source.slice(lineStart, m.index).includes('//')) return false;
-    return !comments.some(([a, b]) => m.index >= a && m.index < b);
-  });
+  const live = [...blankComments(source).matchAll(SERVER_DECL)];
   if (live.length !== 1) {
     throw new Error(`src/server.js: expected exactly one live McpServer declaration (new McpServer({ name: 'rpi-connect', version: '…' })), found ${live.length}`);
   }
   const m = live[0];
-  return { start: m.index, end: m.index + m[0].length, version: m[3], text: m[0], quote: m[2] };
+  const versionStart = m.index + m[1].length;
+  return { start: m.index, end: m.index + m[0].length, version: m[4], versionStart };
 }
 
 const read = (root, p) => fs.readFileSync(path.join(root, p), 'utf8');
@@ -66,7 +108,9 @@ export function fields(s) {
 }
 
 // Problems that would make a release fail after npm has accepted the version. Empty = OK.
-export function releaseProblems(s, tag) {
+// `owner`: the GitHub account the workflow runs under (GITHUB_REPOSITORY_OWNER). GitHub OIDC login
+// lets it publish only io.github.<owner>/… names, so check that before npm uses up the version.
+export function releaseProblems(s, tag, owner) {
   const problems = [];
   let list = [];
   try { list = fields(s); } catch (e) { problems.push(e.message); }
@@ -74,6 +118,9 @@ export function releaseProblems(s, tag) {
   if (!RELEASE_VERSION.test(String(v))) problems.push(`package.json version "${v}" is not a plain X.Y.Z release version`);
   for (const [name, value] of list) if (value !== v) problems.push(`${name} is "${value}", package.json says "${v}" (run: npm run set-version -- ${v})`);
   if (s.pkg.mcpName !== s.server.name) problems.push(`package.json mcpName "${s.pkg.mcpName}" differs from server.json name "${s.server.name}"; the MCP Registry would reject it`);
+  if (owner && !String(s.server.name).startsWith(`io.github.${owner}/`)) {
+    problems.push(`server.json name "${s.server.name}" is not in the io.github.${owner}/ namespace that this repository's GitHub OIDC login may publish to`);
+  }
   if (tag !== undefined) {
     if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag)) problems.push(`tag "${tag}" is not vX.Y.Z (pre-release tags are not published)`);
     else if (tag !== `v${v}`) problems.push(`tag "${tag}" does not match package.json version ${v}`);
@@ -97,12 +144,11 @@ export function withVersion(s, version) {
   npmEntry({ ...s, server }).version = version;
   const src = s.text['src/server.js'];
   const decl = serverDeclaration(src);
-  const q = decl.quote;
-  const newDecl = decl.text.replace(new RegExp(`(version:\\s*)${q}[^'"]*${q}`), `$1${q}${version}${q}`);
+  const newSrc = src.slice(0, decl.versionStart) + version + src.slice(decl.versionStart + decl.version.length);
   return {
     'package.json': json(pkg),
     'package-lock.json': json(lock),
     'server.json': json(server),
-    'src/server.js': src.slice(0, decl.start) + newDecl + src.slice(decl.end),
+    'src/server.js': newSrc,
   };
 }

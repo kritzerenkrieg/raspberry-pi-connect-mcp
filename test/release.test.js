@@ -84,33 +84,54 @@ for (const bad of ['0.2.1-rc..1', '0.2.1-rc.1', '01.2.3', '1.2', 'v1.2.3', '']) 
   });
 }
 
-const DECL = `new McpServer({ name: 'rpi-connect', version: '${v}' })`;
-const editServer = (fn) => (j, text) => {
-  assert.ok(text['src/server.js'].includes(DECL));
-  text['src/server.js'] = fn(text['src/server.js']);
+// Standalone src/server.js fixtures: independent of how the real file is formatted.
+const server = (body) => (j, text) => { text['src/server.js'] = `import { McpServer } from 'x';\n${body}\nawait server.connect();\n`; };
+const decl = (ver, q = "'") => `new McpServer({ name: ${q}rpi-connect${q}, version: ${q}${ver}${q} })`;
+const readAll = (root) => FILES.map((f) => fs.readFileSync(path.join(root, f), 'utf8'));
+const setTo = (root, version) => {
+  for (const [f, content] of Object.entries(withVersion(load(root), version))) fs.writeFileSync(path.join(root, f), content);
+  return fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
 };
 
 test('withVersion throws before any write when the McpServer declaration is missing', (t) => {
-  const root = fixture(t, editServer((src) => src.replace(DECL, `new McpServer({ name: 'other', version: '${v}' })`)));
-  const before = FILES.map((f) => fs.readFileSync(path.join(root, f), 'utf8'));
+  const root = fixture(t, server(`const server = new McpServer({ name: 'other', version: '${v}' });`));
+  const before = readAll(root);
   assert.throws(() => withVersion(load(root), '1.2.3'), /expected exactly one live McpServer declaration .* found 0/);
-  assert.deepEqual(FILES.map((f) => fs.readFileSync(path.join(root, f), 'utf8')), before);
+  assert.deepEqual(readAll(root), before);
 });
 
-test('gate and set-version use the live declaration, not a commented-out one', (t) => {
-  const live = `new McpServer({\n  name: "rpi-connect",\n  version: "0.0.9",\n})`.replace(',\n})', '\n})');
-  for (const comment of [(d) => `// ${d}`, (d) => `/* ${d} */`]) {
-    const root = fixture(t, editServer((src) => src.replace(DECL, `${comment(DECL)}\nconst server = ${live};`).replace('const server = new', 'const server0 = new')));
-    assert.match(releaseProblems(load(root), `v${v}`).join('\n'), /src\/server.js McpServer version is "0.0.9"/);
-    for (const [f, content] of Object.entries(withVersion(load(root), '1.2.3'))) fs.writeFileSync(path.join(root, f), content);
-    const src = fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
-    assert.ok(src.includes(comment(DECL)), 'the comment is left alone');
-    assert.ok(src.includes('version: "1.2.3"'), 'the live declaration is updated, keeping its quotes');
+for (const [label, comment] of [['//', (d) => `// const server = ${d};`], ['/* */', (d) => `/* const server = ${d}; */`]]) {
+  test(`gate and set-version ignore a ${label} commented-out declaration`, (t) => {
+    const live = `const server = new McpServer({\n  name: "rpi-connect",\n  version: "${v}",\n});`;
+    const root = fixture(t, server(`${comment(decl('0.0.1'))}\n${live}`));
+    assert.deepEqual(releaseProblems(load(root), `v${v}`), []);
+    const src = setTo(root, '1.2.3');
+    assert.ok(src.includes(comment(decl('0.0.1'))), 'the comment is left alone');
+    assert.ok(src.includes('  version: "1.2.3",\n});'), 'the live declaration is updated, keeping quotes and trailing comma');
     assert.deepEqual(releaseProblems(load(root), 'v1.2.3'), []);
-  }
+  });
+}
+
+test('a // inside a string or regex on the same line is not a comment', (t) => {
+  const root = fixture(t, server(`const url = 'https://example.com', re = /a\\/\\//; const server = ${decl(v)};`));
+  assert.deepEqual(releaseProblems(load(root), `v${v}`), []);
+  assert.ok(setTo(root, '1.2.3').includes(decl('1.2.3')));
+});
+
+test('a declaration in a line comment after the live one is ignored', (t) => {
+  const root = fixture(t, server(`const server = ${decl(v, '"')}; // was ${decl('0.0.1')}`));
+  assert.deepEqual(releaseProblems(load(root), `v${v}`), []);
+  assert.ok(setTo(root, '1.2.3').includes(`${decl('1.2.3', '"')}; // was ${decl('0.0.1')}`));
 });
 
 test('gate rejects two live McpServer declarations', (t) => {
-  const root = fixture(t, editServer((src) => src.replace(DECL, `${DECL}; const other = ${DECL}`)));
+  const root = fixture(t, server(`const server = ${decl(v)};\nconst other = ${decl(v)};`));
   assert.match(releaseProblems(load(root), `v${v}`).join('\n'), /found 2/);
+});
+
+test('gate checks the registry namespace against the repository owner', () => {
+  const s = load(repo);
+  const owner = s.server.name.split('/')[0].replace(/^io\.github\./, '');
+  assert.deepEqual(releaseProblems(s, `v${v}`, owner), []);
+  assert.match(releaseProblems(s, `v${v}`, 'someone-else').join('\n'), /not in the io\.github\.someone-else\/ namespace/);
 });

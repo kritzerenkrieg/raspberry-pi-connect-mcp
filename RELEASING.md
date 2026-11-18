@@ -5,7 +5,8 @@ A release is one GitHub release, `vX.Y.Z`. Publishing it starts
 three jobs, each starting only if the previous one succeeded:
 
 ```
-GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all six version fields = X.Y.Z; mcpName = server.json name
+GitHub release vX.Y.Z ──► check         tag is vX.Y.Z; all six version fields = X.Y.Z; mcpName = server.json name;
+                                        name in io.github.<repo owner>/
                                         mcp-publisher validate (the registry's own check of server.json)
                                         npm ci, npm test
                      ──► npm           npm publish   (trusted publishing + provenance)
@@ -102,9 +103,10 @@ git push -u origin release/v0.2.1
 
 `set-version` updates the six version fields across four files, and checks that it can find all
 of them before writing any file. In `src/server.js` it uses the one live (not commented-out)
-`new McpServer({ name: 'rpi-connect', version: … })`, and stops if there isn't exactly one. If a write
-itself fails (disk full, permissions), it lists which files were already updated; fix the cause and
-run the same command again:
+`new McpServer({ name: 'rpi-connect', version: … })`, and stops if there isn't exactly one. Each file is
+replaced atomically (temporary file, then rename), so a failed write (disk full, permissions) leaves
+that file intact; it lists which files were already updated. Fix the cause and run the same command
+again:
 
 | File | Field |
 |---|---|
@@ -163,7 +165,7 @@ npm view raspberry-pi-connect-mcp version                       # 0.2.1
 npm view raspberry-pi-connect-mcp@0.2.1 gitHead                 # the release commit
 npm view raspberry-pi-connect-mcp@0.2.1 dist.attestations.url   # set = provenance exists
 curl -s -o /dev/null -w '%{http_code}\n' \
-  "https://registry.modelcontextprotocol.io/v0/servers/io.github.kritzerenkrieg%2Fraspberry-pi-connect-mcp/versions/0.2.1"   # 200
+  "https://registry.modelcontextprotocol.io/v0/servers/io.github.kritzerenkrieg%2Fraspberry-pi-connect-mcp/versions/0.2.1?include_deleted=true"   # 200
 ```
 
 On the npm page, the version should show a **Provenance** section, "Built and signed on GitHub
@@ -182,6 +184,7 @@ To check that the published package starts, run
 | `check`: `tag "vX" does not match package.json version Y` | Release created with the wrong tag, or before the version PR was merged | Delete the release and tag (below), then create it again |
 | `check`: `tag "…" is not vX.Y.Z` | A pre-release or malformed tag | Delete it; use a plain `vX.Y.Z` |
 | `check`: `mcpName … differs from server.json name` | One of the two names was changed | Make them equal in a PR, then see **Fixing a release that failed in `check`** below |
+| `check`: `server.json name … is not in the io.github.<owner>/ namespace` | `server.json` `name` (and `mcpName`) names another GitHub owner; the registry would refuse this repository's OIDC login for it | Use `io.github.kritzerenkrieg/…` in a PR, then see **Fixing a release that failed in `check`** below |
 | `check`: `Validate server.json` fails | `server.json` breaks the registry's schema or rules (e.g. a missing `description`) | Fix `server.json` in a PR, then see **Fixing a release that failed in `check`** below |
 | `npm`: `E404 Not Found - PUT` / `ENEEDAUTH` | Trusted publisher missing or expired, **Allow npm publish** not ticked, or a field doesn't match (workflow name, case) | Check 1.1, then **Re-run failed jobs** |
 | `npm`: `could not check whether … is on npm; not publishing` | The npm registry lookup failed (network, outage) | **Re-run failed jobs** later. It never publishes without a confirmed answer |
@@ -206,9 +209,16 @@ old commit, and merging a fix doesn't start a new run. After the fix is merged t
 1. Delete the release and its tag: `gh release delete v0.2.1 --yes --cleanup-tag`.
 2. Create the release again from `main` (2.4). That makes a new tag on the fixed commit and a new run.
 
-Reusing the same version is fine here because neither npm nor the MCP Registry has it. Check first
-if unsure: `npm view raspberry-pi-connect-mcp@0.2.1 version` should fail with `E404`, and the
-registry lookup in 2.6 should print `404`. If either has it, release the next patch version instead.
+The same version can be reused only if it has **never** been published anywhere. A failed `check`
+job publishes nothing, so that holds unless the version was published some other way. Note that an
+`E404` from `npm view` is not proof: a version that was published and then unpublished also returns
+`E404`, and npm never accepts it again. So, before reusing the number:
+
+- npm: `npm view raspberry-pi-connect-mcp time --json` must not list the version (this history
+  normally keeps unpublished versions too), and you must not have published it by hand.
+- MCP Registry: the lookup in 2.6 (it includes deleted versions) must print `404`.
+
+If either has it, or you're unsure, release the next patch version instead.
 
 **Deleting a release and tag**, for example after a wrong tag, *before* anything was published:
 
