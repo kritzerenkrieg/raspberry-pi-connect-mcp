@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { Connect } from './connect.js';
-import { startLogin, logout, savedSession, loginState, checkDisplay } from './auth.js';
+import { startLogin, logout, savedSession, loginState, checkCanLogin } from './auth.js';
 
 const connect = new Connect();
 const server = new McpServer({ name: 'rpi-connect', version: '0.2.0' });
@@ -68,18 +68,25 @@ server.tool(
     'saved, its device names, and whether a login is in progress.',
   {},
   wrap(async () => {
-    const saved = savedSession();
-    const out = { signedIn: !!saved, savedAt: saved?.savedAt || null, ...loginState() };
-    if (saved) {
+    // Email and devices must come from the same session: if it changes while we read (a login or
+    // logout elsewhere), read again rather than pair one account's email with another's devices.
+    for (let attempt = 1; ; attempt++) {
+      const saved = savedSession();
+      const out = { signedIn: !!saved, savedAt: saved?.savedAt || null, ...loginState() };
+      if (!saved) return text(out);
       try {
         out.email = await connect.accountEmail();
         out.devices = (await connect.listDevices()).map((d) => d.name);
       } catch (e) {
-        out.signedIn = false;
+        // Signed out only when the session is known to be invalid; a network error says nothing about it.
+        out.signedIn = e.expired ? false : savedSession() ? null : false;
         out.error = e.message;
       }
+      const now = savedSession();
+      if (now?.savedAt === saved.savedAt && !!now === !!saved) return text(out);
+      if (attempt === 2) return text({ ...out, signedIn: null, email: undefined, devices: undefined,
+        error: 'The session changed while it was being read (login/logout elsewhere); call account again.' });
     }
-    return text(out);
   }),
 );
 
@@ -93,12 +100,21 @@ server.tool(
     wait_sec: z.number().int().min(0).max(600).default(180).describe('Seconds to wait for the user to finish'),
   },
   wrap(async ({ fresh, wait_sec }) => {
-    checkDisplay(); // before signing out, so a missing display doesn't cost the current session
+    checkCanLogin(); // display and Chrome, before signing out, so a doomed login keeps the current session
     const out = {};
     if (fresh) { await connect.reset(); out.logout = await logout(); }
-    const l = startLogin({ onSaved: () => connect.reset() });
+    let l;
+    try {
+      l = startLogin({ onSaved: () => connect.reset() });
+    } catch (e) {
+      if (!out.logout) throw e;
+      // Signed out already: keep the backup location and restore command in the answer.
+      return text({ ...out, result: { ok: false, message: e.message } });
+    }
     out.status = l.started ? 'Chrome window opened: the user must sign in there' : 'login already in progress';
-    const r = await Promise.race([l.promise, new Promise((res) => setTimeout(() => res(null), wait_sec * 1000))]);
+    let timer;
+    const r = await Promise.race([l.promise, new Promise((res) => { timer = setTimeout(() => res(null), wait_sec * 1000); })]);
+    clearTimeout(timer);
     out.result = r || { ok: null, message: `Still waiting after ${wait_sec}s; call account to check.` };
     return text(out);
   }),

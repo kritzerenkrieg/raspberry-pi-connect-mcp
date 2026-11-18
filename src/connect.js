@@ -19,7 +19,10 @@ export function stripAnsi(s) {
 }
 
 class ExpiredError extends Error {
-  constructor() { super('Raspberry Pi Connect session expired. Use the login tool, then ask the user to sign in in the Chrome window.'); }
+  constructor() {
+    super('Raspberry Pi Connect session expired. Use the login tool, then ask the user to sign in in the Chrome window.');
+    this.expired = true; // lets callers tell an invalid session from a network error
+  }
 }
 
 export class Connect {
@@ -102,11 +105,14 @@ export class Connect {
 
   async resolve(device) {
     if (sessionStamp() !== this.stamp) this.devicesCache = null; // account may have changed
-    const devices = this.devicesCache || (await this.listDevices());
+    const cached = this.devicesCache;
+    const devices = cached || (await this.listDevices());
     const q = device.trim().toLowerCase();
     let m = devices.filter((d) => d.id === q || d.name.toLowerCase() === q);
     if (!m.length) m = devices.filter((d) => d.name.toLowerCase().includes(q));
-    if (m.length === 0 && this.devicesCache) { this.devicesCache = null; return this.resolve(device); }
+    // Not found in a cached list: it may be new, so fetch once more. (A fresh list also fills the cache,
+    // so test where this list came from; testing the cache here looped forever on an unknown device.)
+    if (m.length === 0 && cached) { this.devicesCache = null; return this.resolve(device); }
     if (m.length === 0) throw new Error(`No device matches "${device}". Use list_devices.`);
     if (m.length > 1) throw new Error(`"${device}" is ambiguous: ${m.map((d) => d.name).join(', ')}`);
     const d = m[0];
@@ -258,13 +264,18 @@ export class Connect {
     await ctx?.close().catch(() => {});
   }
 
-  // Best effort: the signed-in account's email, read from the Connect page, else the Raspberry Pi ID page.
+  // Best effort: the signed-in account's email, from the user menu of the Connect page, else of the
+  // Raspberry Pi ID page. Only the user menu counts (a device may be named like an email); else null.
   async accountEmail() {
     const ctx = await this.context();
     const page = await ctx.newPage();
     const find = () => page.evaluate(() => {
-      const m = document.body.innerText.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/);
-      return m ? m[0] : null;
+      const re = /[\w.+-]+@[\w-]+(\.[\w-]+)+/;
+      for (const el of document.querySelectorAll('[id*="user-menu"], [class*="user-menu"]')) {
+        const m = (el.textContent || '').match(re); // textContent: the menu is usually collapsed (hidden)
+        if (m) return m[0];
+      }
+      return null;
     });
     try {
       await page.goto(`${CONNECT_URL}/devices`, { waitUntil: 'domcontentloaded' });
