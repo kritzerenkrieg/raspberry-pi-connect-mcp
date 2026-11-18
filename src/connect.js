@@ -27,19 +27,35 @@ export class Connect {
   sessions = new Map(); // deviceId -> { page, name, queue }
   devicesCache = null;
 
+  launching = null; // promise of a browser launch in progress, shared by concurrent callers
+  generation = 0; // bumped by reset(), so a launch that was in progress when it ran is discarded
+
   async context() {
-    // Reload when the session file changed (login/logout from the tools or a terminal): no reconnect needed.
-    const stamp = sessionStamp();
-    if (this.ctx && stamp !== this.stamp) await this.reset();
-    if (!this.ctx) {
-      const ctx = await launch();
-      this.ctx = ctx;
-      this.stamp = stamp;
-      ctx.on('close', () => {
-        if (this.ctx === ctx) { this.ctx = null; this.sessions.clear(); }
-      });
+    for (;;) {
+      // Reload when the session file changed (login/logout from the tools or a terminal): no reconnect needed.
+      const stamp = sessionStamp();
+      if (this.ctx && stamp !== this.stamp) await this.reset();
+      if (this.ctx) return this.ctx;
+      if (!this.launching) {
+        const generation = this.generation;
+        this.launching = (async () => {
+          try {
+            const ctx = await launch();
+            // reset() ran during the launch: this browser may hold the old session, so close it and
+            // let the loop launch again with the current session file.
+            if (generation !== this.generation) { await ctx.close().catch(() => {}); return; }
+            this.ctx = ctx;
+            this.stamp = stamp;
+            ctx.on('close', () => {
+              if (this.ctx === ctx) { this.ctx = null; this.sessions.clear(); }
+            });
+          } finally {
+            this.launching = null;
+          }
+        })();
+      }
+      await this.launching;
     }
-    return this.ctx;
   }
 
   async listDevices() {
@@ -135,6 +151,9 @@ export class Connect {
     });
     const s = { page, name: d.name, id: d.id, queue: Promise.resolve(), seq: 0 };
     this.sessions.set(d.id, s);
+    // The terminal shows before the shell has connected, and keystrokes sent then can be dropped
+    // (the command never runs; only prompts come back). Wait for the shell's first output, its prompt.
+    await page.waitForFunction(() => window.__out.length > 0, null, { timeout: 20_000 }).catch(() => {});
     await page.waitForTimeout(500);
     // Non-interactive-friendly defaults for this shell only.
     await this.input(s, ' export PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat SYSTEMD_COLORS=0\n');
@@ -231,6 +250,7 @@ export class Connect {
 
   // Drop the browser, shell sessions and device cache, so the next call loads the current session file.
   async reset() {
+    this.generation++;
     const ctx = this.ctx;
     this.ctx = null;
     this.sessions.clear();

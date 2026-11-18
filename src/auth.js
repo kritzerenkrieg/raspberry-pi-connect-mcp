@@ -137,8 +137,14 @@ export async function logout({ del = false } = {}) {
   const d = new Date(); // local time, so the folder name matches the clock
   const n = (x) => String(x).padStart(2, '0');
   const stamp = `${d.getFullYear()}${n(d.getMonth() + 1)}${n(d.getDate())}_${n(d.getHours())}${n(d.getMinutes())}${n(d.getSeconds())}`;
-  const dir = path.join(BASE, `old-account_${stamp}`);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Create the folder exclusively, so a second backup in the same second (or a repeated DST hour)
+  // gets old-account_<stamp>_2 instead of overwriting the first one.
+  fs.mkdirSync(BASE, { recursive: true, mode: 0o700 });
+  let dir;
+  for (let i = 1; ; i++) {
+    dir = path.join(BASE, `old-account_${stamp}${i > 1 ? `_${i}` : ''}`);
+    try { fs.mkdirSync(dir, { mode: 0o700 }); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
   for (const p of items) fs.renameSync(p, path.join(dir, path.basename(p)));
   return {
     signedOut: true,

@@ -279,12 +279,30 @@ test('logout waits for pending login and allows a new login afterwards', async (
   await f.time.tick(2000);
 });
 
-async function connectFixture() {
+test('logout never reuses a backup folder from the same second', async (t) => {
+  const f = await authFixture(t); // the mocked clock stands still, so every backup gets the same stamp
+  const dirs = [];
+  for (const n of [1, 2, 3]) {
+    fs.writeFileSync(f.SESSION_FILE, `{"n":${n}}`);
+    fs.mkdirSync(path.join(f.PROFILE_DIR, 'Default'), { recursive: true });
+    dirs.push((await f.auth.logout()).backup);
+  }
+  assert.equal(new Set(dirs).size, 3);
+  assert.match(dirs[1], /_2$/);
+  assert.match(dirs[2], /_3$/);
+  dirs.forEach((d, i) => {
+    assert.equal(fs.readFileSync(path.join(d, 'session.json'), 'utf8'), `{"n":${i + 1}}`);
+    assert.equal(fs.existsSync(path.join(d, 'profile', 'Default')), true);
+  });
+});
+
+async function connectFixture({ beforeLaunch } = {}) {
   let stamp = 1;
   const contexts = [];
   const { Connect } = await load('src/connect.js', {
     'node:fs': { default: { statSync() { if (stamp === null) throw new Error('ENOENT'); return { mtimeMs: stamp }; } } },
     './browser.js': { CONNECT_URL, SESSION_FILE: '/fake/session', launch: async () => {
+      await beforeLaunch?.();
       if (stamp === null) throw new Error('Not signed in. Use the login tool');
       const ctx = new EventEmitter();
       ctx.closed = 0;
@@ -317,6 +335,22 @@ test('session deletion invalidates existing context before reporting sign-in req
   await assert.rejects(f.connect.context(), /login tool/);
   assert.equal(old.closed, 1);
   assert.equal(f.connect.ctx, null);
+});
+
+test('reset during a browser launch discards that browser; concurrent callers share the relaunch', async () => {
+  let release;
+  const gates = [new Promise((r) => { release = r; })];
+  const f = await connectFixture({ beforeLaunch: () => gates.shift() });
+  const first = f.connect.context();
+  const concurrent = f.connect.context();
+  await f.connect.reset(); // e.g. login(fresh=true) while a tool call is starting the browser
+  release();
+  const ctx = await first;
+  assert.equal(await concurrent, ctx);
+  assert.equal(f.contexts.length, 2);
+  assert.equal(f.contexts[0].closed, 1);
+  assert.equal(ctx, f.contexts[1]);
+  assert.equal(f.connect.ctx, ctx);
 });
 
 test('reset is safe without a context and tolerates browser-close failure', async () => {
@@ -494,13 +528,15 @@ for (const fresh of [false, true]) {
     test(`CLI wrapper: fresh=${fresh}, login succeeds=${ok}`, async () => {
       const calls = [];
       await load('scripts/login.js', { '../src/auth.js': {
+        checkDisplay: () => { calls.push('checkDisplay'); },
         logout: async () => { calls.push('logout'); return { signedOut: true }; },
         startLogin: () => { calls.push('login'); return { promise: Promise.resolve({ ok, message: 'login result' }) }; },
       } }, {
         console: { log: (message) => calls.push(message) },
         process: { argv: ['node', 'login.js', ...(fresh ? ['--fresh'] : [])], exit: (code) => calls.push(['exit', code]) },
       });
-      if (fresh) assert.equal(calls[0], 'logout');
+      assert.equal(calls[0], 'checkDisplay');
+      if (fresh) assert.equal(calls[1], 'logout');
       else assert.equal(calls.includes('logout'), false);
       assert.ok(calls.includes('login result'));
       assert.ok(calls.indexOf('login') < calls.indexOf('login result'));
