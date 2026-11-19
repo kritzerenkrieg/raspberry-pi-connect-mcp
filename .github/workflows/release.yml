@@ -99,6 +99,7 @@ jobs:
   mcp-registry:
     needs: npm
     runs-on: ubuntu-latest
+    timeout-minutes: 20 # the npm wait is 10 min at most; the rest is download, lookup and publish
     permissions:
       contents: read
       id-token: write # MCP Registry login via GitHub OIDC
@@ -112,6 +113,24 @@ jobs:
           curl -fsSL --retry 3 -o mcp-publisher.tar.gz "$MCP_PUBLISHER_URL"
           echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
           tar xzf mcp-publisher.tar.gz mcp-publisher
+      # npm takes a minute or two to show a new version, and the MCP Registry rejects a package
+      # version that npm doesn't show yet (HTTP 400 "version ... was not found"). Wait for it.
+      - name: Wait until npm shows this version
+        run: |
+          name="$(node -p 'require("./package.json").name')"
+          v="$(node -p 'require("./package.json").version')"
+          # A wall-clock deadline, and each lookup bounded to 30 s without npm's own retries, so an
+          # npm outage fails after about 10 minutes rather than npm's backoff stretching it out.
+          deadline=$(( $(date +%s) + 600 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if [ "$(timeout 30 npm view "$name@$v" version --prefer-online --fetch-retries=0 2>/dev/null)" = "$v" ]; then
+              echo "$name@$v is visible on npm"; exit 0
+            fi
+            echo "Waiting for $name@$v to appear on npm ($(( deadline - $(date +%s) )) s left)"
+            sleep 15
+          done
+          echo "::error::$name@$v did not appear on npm within 10 minutes. Check https://www.npmjs.com/package/$name, then Re-run failed jobs."
+          exit 1
       # The same check as in the npm job, again, for a record created in between:
       # absent = publish; same install configuration = skip; conflict, deleted, lookup error = stop.
       - name: Publish to the MCP Registry (skipped if this version is already there)
