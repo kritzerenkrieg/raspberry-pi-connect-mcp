@@ -6,8 +6,10 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { spawnSync } from 'node:child_process';
 
+const win = {}; // the page's window, for run() against a fake page
+let context;
 async function loadConnect() {
-  const context = vm.createContext({ URL, console, process: { env: {} } });
+  context = vm.createContext({ URL, console, process: { env: {} }, window: win });
   const module = new vm.SourceTextModule(fs.readFileSync(new URL('../src/connect.js', import.meta.url), 'utf8'), { context });
   await module.link((name) => {
     const exports = {
@@ -58,7 +60,9 @@ test('a syntax error ends the command instead of waiting for a marker that never
   assert.doesNotMatch(out, /__RPE_d1_/);
   assert.deepEqual({ ...scanOutput(out, 'd1') }, { exitCode: 2, syntaxError: true });
   // As a terminal delivers it, after readline turns bracketed paste off.
-  assert.equal(scanOutput('$  { echo (\r\n\x1b[?2004l\rbash: syntax error near unexpected token', 'd1').exitCode, 2);
+  const term = '$  { echo (\r\n\x1b[?2004l\rbash: syntax error near unexpected token `newline\'';
+  assert.equal(scanOutput(term, 'd1'), null); // the line is not complete yet
+  assert.equal(scanOutput(`${term}\r\n`, 'd1').exitCode, 2);
   assert.equal(scanOutput('bash: -c: line 1: syntax error near x\n', 'd1'), null); // a script's error, not the shell's
 });
 
@@ -77,4 +81,31 @@ test('offline devices fail at once after a fresh list; the remote shell flag doe
   assert.equal(lists, 1);
   await assert.rejects(connect.session('Pi Renamed'), /browser reached/); // it goes on to open the shell
   assert.equal(lists, 1);
+});
+
+test('text that looks like a syntax error, printed by the command, does not end it', () => {
+  const raw = '\r\n__RPS_e1__\r\nbash: syntax error near unexpected token `x\'\r\nstill running';
+  assert.equal(scanOutput(raw, 'e1'), null);
+  assert.equal(scanOutput(`${raw}\r\n__RPE_e1_0__\r\n`, 'e1').exitCode, 0);
+});
+
+test('run returns the output of the snapshot that showed the end, even if the buffer is trimmed after', async () => {
+  win.__out = 'x'.repeat(50);
+  win.__term = { input(d) {
+    const n = /__RPS_%s__\\n' (\w+);/.exec(d)?.[1];
+    if (n) win.__out += `\r\n__RPS_${n}__\r\nhello\r\n__RPE_${n}_3__\r\n`;
+  } };
+  const page = {
+    isClosed: () => false,
+    waitForTimeout: async () => {},
+    evaluate: async (fn, arg) => fn(arg),
+    waitForFunction: async (expr) => {
+      const value = vm.runInContext(expr, context);
+      win.__out = win.__out.slice(-5); // the write hook trims the buffer before run reads it again
+      return { jsonValue: async () => JSON.parse(JSON.stringify(value)) };
+    },
+  };
+  const connect = new Connect();
+  connect.session = async () => ({ page, name: 'Pi', queue: Promise.resolve(), seq: 0 });
+  assert.deepEqual({ ...(await connect.run('Pi', 'echo hello')) }, { device: 'Pi', exitCode: 3, output: 'hello' });
 });

@@ -35,9 +35,13 @@ export function commandInput(n, command) {
 export function scanOutput(raw, n) {
   const end = new RegExp(`__RPE_${n}_(\\d+)__`).exec(raw);
   if (end) return { exitCode: Number(end[1]) };
+  // The start marker prints only once bash has parsed the whole input: from then on, any
+  // "bash: syntax error" is the command's own output and the command may still be running.
+  if (raw.includes(`__RPS_${n}__`)) return null;
   // Interactive bash's own parse error: nothing ran, so no end marker will come. In a terminal the
-  // message follows escape codes and a carriage return (readline ending bracketed paste).
-  if (/(^|\n)(\x1b\[[0-?]*[ -/]*[@-~]|\r)*-?bash: syntax error/.test(raw)) return { exitCode: 2, syntaxError: true };
+  // message follows escape codes and a carriage return (readline ending bracketed paste). Only a
+  // whole line counts, so the snapshot that matched holds the complete error.
+  if (/(^|\n)(\x1b\[[0-?]*[ -/]*[@-~]|\r)*-?bash: syntax error[^\n]*\n/.test(raw)) return { exitCode: 2, syntaxError: true };
   return null;
 }
 
@@ -229,16 +233,18 @@ export class Connect {
       const start = await s.page.evaluate(() => window.__out.length);
       await this.input(s, commandInput(n, command));
       // Watch for the end inside the page, rather than copying the whole output back on every poll.
+      // The output comes from the same snapshot that showed the end: a later read could find it
+      // trimmed away by the write hook.
+      const watch = `(() => { const t = window.__out.slice(${start}); ` +
+        `const r = (${scanOutput})(t, ${JSON.stringify(n)}); return r && { ...r, raw: t }; })()`;
       const done = await s.page
-        .waitForFunction(`(${scanOutput})(window.__out.slice(${start}), ${JSON.stringify(n)})`, null,
-          { timeout: timeoutSec * 1000, polling: 100 })
+        .waitForFunction(watch, null, { timeout: timeoutSec * 1000, polling: 100 })
         .then((h) => h.jsonValue(), (e) => { if (s.page.isClosed()) throw e; return null; });
-      if (done?.syntaxError) await s.page.waitForTimeout(300); // let the rest of the error and the prompt arrive
-      const text = stripAnsi(await s.page.evaluate((i) => window.__out.slice(i), start));
+      const text = stripAnsi(done ? done.raw : await s.page.evaluate((i) => window.__out.slice(i), start));
       const startRe = new RegExp(`__RPS_${n}__\\n`);
       const sm = startRe.exec(text);
       if (done?.syntaxError) {
-        // Nothing ran; the output is the echoed input and bash's errors. The first error is the real one.
+        // Nothing ran; the output is the echoed input and bash's error, whose whole line is in the snapshot.
         const err = text.split('\n').find((l) => /^-?bash: syntax error/.test(l));
         return { device: s.name, exitCode: 2, output: err || cleanBody(text) };
       }
