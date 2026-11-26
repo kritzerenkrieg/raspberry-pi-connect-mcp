@@ -18,6 +18,29 @@ export function stripAnsi(s) {
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 }
 
+// The keystrokes run() types for one command. Markers are produced by printf so they never appear
+// literally in the echoed command line. The command and the end marker are one compound command:
+// bash reads all of it before running any of it, so the end marker is never left as typed-ahead
+// input for the command to swallow. (It was a separate line once, and sudo, ssh and anything else
+// that reads or flushes the terminal ate it, leaving run() waiting out its whole timeout.)
+// A group, not a subshell, so cd and variables still carry over to the next command. The start
+// marker is part of it too: it prints only once the shell has read (and echoed) the whole input.
+export function commandInput(n, command) {
+  const cmd = command.trim() ? command : ':';
+  return ` printf '\\n__RPS_%s__\\n' ${n}; { ${cmd}\n}; printf '\\n__RPE_%s_%s__\\n' ${n} $?\n`;
+}
+
+// Whether a command's output (raw terminal stream after its input was sent) shows it finished.
+// Self-contained: it also runs inside the page, from its source text.
+export function scanOutput(raw, n) {
+  const end = new RegExp(`__RPE_${n}_(\\d+)__`).exec(raw);
+  if (end) return { exitCode: Number(end[1]) };
+  // Interactive bash's own parse error: nothing ran, so no end marker will come. In a terminal the
+  // message follows escape codes and a carriage return (readline ending bracketed paste).
+  if (/(^|\n)(\x1b\[[0-?]*[ -/]*[@-~]|\r)*-?bash: syntax error/.test(raw)) return { exitCode: 2, syntaxError: true };
+  return null;
+}
+
 class ExpiredError extends Error {
   constructor() {
     super('Raspberry Pi Connect session expired. Use the login tool, then ask the user to sign in in the Chrome window.');
@@ -124,10 +147,19 @@ export class Connect {
   }
 
   async session(device) {
-    const d = await this.resolve(device);
+    let d = await this.resolve(device);
     const existing = this.sessions.get(d.id);
     if (existing && !existing.page.isClosed() && (await this.alive(existing.page))) return existing;
     if (existing) await existing.page.close().catch(() => {});
+
+    // Opening a shell on an offline device only fails after CONNECT_TIMEOUT. The list may be stale
+    // (the device just came online), so check a fresh one before giving up. (The list's remote shell
+    // flag is not checked: it can read false while the shell works, e.g. just after a rename.)
+    if (!d.online) {
+      this.devicesCache = null;
+      d = await this.resolve(d.id);
+      if (!d.online) throw new Error(`${d.name} is offline (last seen: ${d.lastSeen || 'unknown'}).`);
+    }
 
     const ctx = await this.context();
     const page = await ctx.newPage();
@@ -195,24 +227,26 @@ export class Connect {
     return this.serialize(s, async () => {
       const n = `${Date.now().toString(36)}${++s.seq}`;
       const start = await s.page.evaluate(() => window.__out.length);
-      // Markers are produced by printf so they never appear literally in the echoed command line.
-      const line = ` printf '\\n__RPS_%s__\\n' ${n}; ${command}\n printf '\\n__RPE_%s_%s__\\n' ${n} $?\n`;
-      await this.input(s, line);
+      await this.input(s, commandInput(n, command));
+      // Watch for the end inside the page, rather than copying the whole output back on every poll.
+      const done = await s.page
+        .waitForFunction(`(${scanOutput})(window.__out.slice(${start}), ${JSON.stringify(n)})`, null,
+          { timeout: timeoutSec * 1000, polling: 100 })
+        .then((h) => h.jsonValue(), (e) => { if (s.page.isClosed()) throw e; return null; });
+      if (done?.syntaxError) await s.page.waitForTimeout(300); // let the rest of the error and the prompt arrive
+      const text = stripAnsi(await s.page.evaluate((i) => window.__out.slice(i), start));
       const startRe = new RegExp(`__RPS_${n}__\\n`);
-      const endRe = new RegExp(`\\n__RPE_${n}_(\\d+)__`);
-      const deadline = Date.now() + timeoutSec * 1000;
-      let text = '';
-      while (Date.now() < deadline) {
-        await s.page.waitForTimeout(250);
-        text = stripAnsi(await s.page.evaluate((i) => window.__out.slice(i), start));
-        const e = endRe.exec(text);
-        if (e) {
-          const sm = startRe.exec(text);
-          const body = text.slice(sm ? sm.index + sm[0].length : 0, e.index);
-          return { device: s.name, exitCode: Number(e[1]), output: cleanBody(body) };
-        }
-      }
       const sm = startRe.exec(text);
+      if (done?.syntaxError) {
+        // Nothing ran; the output is the echoed input and bash's errors. The first error is the real one.
+        const err = text.split('\n').find((l) => /^-?bash: syntax error/.test(l));
+        return { device: s.name, exitCode: 2, output: err || cleanBody(text) };
+      }
+      if (done) {
+        const e = new RegExp(`\\n?__RPE_${n}_\\d+__`).exec(text);
+        const body = text.slice(sm ? sm.index + sm[0].length : 0, e ? e.index : undefined);
+        return { device: s.name, exitCode: done.exitCode, output: cleanBody(body) };
+      }
       return {
         device: s.name,
         exitCode: null,
