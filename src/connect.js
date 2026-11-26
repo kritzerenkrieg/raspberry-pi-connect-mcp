@@ -142,12 +142,7 @@ export class Connect {
     if (m.length === 0 && cached) { this.devicesCache = null; return this.resolve(device); }
     if (m.length === 0) throw new Error(`No device matches "${device}". Use list_devices.`);
     if (m.length > 1) throw new Error(`"${device}" is ambiguous: ${m.map((d) => d.name).join(', ')}`);
-    const d = m[0];
-    const allow = process.env.RPI_CONNECT_ALLOW;
-    if (allow && !allow.split(',').some((a) => a.trim() && d.name.toLowerCase().includes(a.trim().toLowerCase()))) {
-      throw new Error(`Device "${d.name}" is not in RPI_CONNECT_ALLOW.`);
-    }
-    return d;
+    return checkAllowed(m[0]);
   }
 
   async session(device) {
@@ -160,8 +155,11 @@ export class Connect {
     // (the device just came online), so check a fresh one before giving up. (The list's remote shell
     // flag is not checked: it can read false while the shell works, e.g. just after a rename.)
     if (!d.online) {
-      this.devicesCache = null;
-      d = await this.resolve(d.id);
+      // By its id only: a name match could pick a different device. Its name may have changed, so the
+      // allowlist is checked again.
+      const fresh = (await this.listDevices()).find((x) => x.id === d.id);
+      if (!fresh) throw new Error(`${d.name} is no longer on this account. Use list_devices.`);
+      d = checkAllowed(fresh);
       if (!d.online) throw new Error(`${d.name} is offline (last seen: ${d.lastSeen || 'unknown'}).`);
     }
 
@@ -239,7 +237,10 @@ export class Connect {
         `const r = (${scanOutput})(t, ${JSON.stringify(n)}); return r && { ...r, raw: t }; })()`;
       const done = await s.page
         .waitForFunction(watch, null, { timeout: timeoutSec * 1000, polling: 100 })
-        .then((h) => h.jsonValue(), (e) => { if (s.page.isClosed()) throw e; return null; });
+        .then(async (h) => {
+          // The handle keeps the snapshot alive in the page until it is disposed.
+          try { return await h.jsonValue(); } finally { await h.dispose().catch(() => {}); }
+        }, (e) => { if (s.page.isClosed()) throw e; return null; });
       const text = stripAnsi(done ? done.raw : await s.page.evaluate((i) => window.__out.slice(i), start));
       const startRe = new RegExp(`__RPS_${n}__\\n`);
       const sm = startRe.exec(text);
@@ -334,6 +335,14 @@ export class Connect {
   async shutdown() {
     await this.ctx?.close().catch(() => {});
   }
+}
+
+function checkAllowed(d) {
+  const allow = process.env.RPI_CONNECT_ALLOW;
+  if (allow && !allow.split(',').some((a) => a.trim() && d.name.toLowerCase().includes(a.trim().toLowerCase()))) {
+    throw new Error(`Device "${d.name}" is not in RPI_CONNECT_ALLOW.`);
+  }
+  return d;
 }
 
 // Drop the prompt + echoed second printf line that may trail the output.

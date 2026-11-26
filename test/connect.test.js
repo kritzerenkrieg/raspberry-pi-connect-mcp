@@ -102,10 +102,35 @@ test('run returns the output of the snapshot that showed the end, even if the bu
     waitForFunction: async (expr) => {
       const value = vm.runInContext(expr, context);
       win.__out = win.__out.slice(-5); // the write hook trims the buffer before run reads it again
-      return { jsonValue: async () => JSON.parse(JSON.stringify(value)) };
+      return { jsonValue: async () => { if (failRead) throw new Error('serialize failed'); return JSON.parse(JSON.stringify(value)); },
+        dispose: async () => { disposed++; } };
     },
   };
+  let disposed = 0;
+  let failRead = false;
   const connect = new Connect();
   connect.session = async () => ({ page, name: 'Pi', queue: Promise.resolve(), seq: 0 });
   assert.deepEqual({ ...(await connect.run('Pi', 'echo hello')) }, { device: 'Pi', exitCode: 3, output: 'hello' });
+  assert.equal(disposed, 1); // the handle holding the snapshot is released
+  failRead = true;
+  await assert.rejects(connect.run('Pi', 'echo hello'), /serialize failed/);
+  assert.equal(disposed, 2); // also when reading it fails
+});
+
+test('the fresh list is matched by id, and the allowlist is checked again', async () => {
+  const connect = new Connect();
+  connect.stamp = 1;
+  const old = { id: 'u1', name: 'Pi', online: false, remoteShell: true };
+  connect.devicesCache = [old];
+  let fresh = [{ id: 'u9', name: 'u1 lookalike', online: true, remoteShell: true }]; // u1 is gone
+  connect.listDevices = async () => { connect.devicesCache = fresh; return fresh; };
+  connect.context = async () => { throw new Error('browser reached'); };
+  await assert.rejects(connect.session('Pi'), /Pi is no longer on this account/);
+
+  connect.devicesCache = [old];
+  fresh = [{ ...old, name: 'Other', online: true }]; // renamed out of the allowlist
+  context.process.env.RPI_CONNECT_ALLOW = 'Pi';
+  try {
+    await assert.rejects(connect.session('Pi'), /Device "Other" is not in RPI_CONNECT_ALLOW/);
+  } finally { delete context.process.env.RPI_CONNECT_ALLOW; }
 });
